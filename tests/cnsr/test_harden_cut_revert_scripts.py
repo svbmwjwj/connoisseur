@@ -218,6 +218,52 @@ def test_revert_all_only_warns_when_fail2ban_does_not_restart(staged):
     assert out.status == 0 and "fail2ban" in out.stderr
 
 
+KEPT = "/etc/ssh/sshd_config.d/11-cnsr-kept.conf"
+ORIGINALS = "/opt/cnsr/sshd-original"
+
+
+@pytest.fixture
+def taken_over(staged):
+    """A staged server whose vendor SSH settings harden-stage.sh commented out."""
+    staged.write("/etc/ssh/sshd_config", "# cnsr: Port 22\nUsePAM yes\n", mode=0o600)
+    staged.write("/etc/ssh/sshd_config.d/50-cloud-init.conf", "# cnsr: PasswordAuthentication yes\n")
+    staged.write(KEPT, "PasswordAuthentication yes\n")
+    staged.write(f"{ORIGINALS}/sshd_config", "Port 22\nUsePAM yes\n", mode=0o600)
+    staged.write(f"{ORIGINALS}/sshd_config.d/50-cloud-init.conf", "PasswordAuthentication yes\n")
+    return staged
+
+
+def test_revert_all_puts_the_vendor_ssh_files_back_before_ssh_restarts(taken_over):
+    out = revert(taken_over, "all")
+    assert (out.status, out.stderr) == (0, "")
+    assert taken_over.read("/etc/ssh/sshd_config") == "Port 22\nUsePAM yes\n"
+    assert taken_over.mode("/etc/ssh/sshd_config") == 0o600
+    assert taken_over.read("/etc/ssh/sshd_config.d/50-cloud-init.conf") == "PasswordAuthentication yes\n"
+    assert not taken_over.path(KEPT).exists() and not taken_over.path(ORIGINALS).exists()
+    assert out.calls[-3:] == ["sshd -t", *RESTART]
+    assert taken_over.leftovers() == []
+
+
+def test_revert_all_keeps_the_copies_when_a_file_cannot_be_put_back(taken_over):
+    copy = taken_over.path(f"{ORIGINALS}/sshd_config.d/50-cloud-init.conf")
+    copy.chmod(0o000)
+    try:
+        out = revert(taken_over, "all")
+    finally:
+        copy.chmod(0o644)
+    assert out.status == 1 and "50-cloud-init.conf" in out.stderr
+    assert taken_over.read("/etc/ssh/sshd_config") == "Port 22\nUsePAM yes\n"
+    assert taken_over.path(f"{ORIGINALS}/sshd_config.d/50-cloud-init.conf").exists()
+    assert out.calls[-3:] == ["sshd -t", *RESTART]
+
+
+def test_revert_stage_leaves_the_taken_over_settings_as_staged(taken_over):
+    taken_over.write(DROP_IN, CUT)
+    assert revert(taken_over).status == 0
+    assert taken_over.read("/etc/ssh/sshd_config") == "# cnsr: Port 22\nUsePAM yes\n"
+    assert taken_over.read(KEPT) == "PasswordAuthentication yes\n"
+
+
 # --- baseline-check.sh -------------------------------------------------------------------
 
 SSHD_T = "port 22\npermitrootlogin without-password\npasswordauthentication no\nkbdinteractiveauthentication no\n"

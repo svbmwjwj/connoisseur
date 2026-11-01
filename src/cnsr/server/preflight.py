@@ -21,7 +21,7 @@ NODE_DIR = "/opt/cnsr"
 # image included). The cloud or host firewall keeps it closed, so it is part of a fresh system.
 _SYSTEM_PORTS = frozenset({5355})
 _TEXT_KEYS = ("os_id", "os_version", "arch", "user", "ipv6")
-_LIST_KEYS = ("listen", "udp_listen", "fw", "port_line")
+_LIST_KEYS = ("listen", "udp_listen", "fw", "sshd_line")
 _DIGITS = re.compile(r"[0-9]+")
 # A ufw rule as `ufw status` prints it: "22/tcp ALLOW Anywhere", "22/tcp (v6) ALLOW Anywhere (v6)".
 _UFW_PORT = re.compile(r"([0-9]+)(?:/(?:tcp|udp))?")
@@ -41,7 +41,7 @@ class Facts:
     containers: int = 0
     fw: list[str] = field(default_factory=list)
     admin_exists: bool = False
-    port_line: list[str] = field(default_factory=list)
+    sshd_line: list[str] = field(default_factory=list)
     ipv6: str = ""
 
 
@@ -103,11 +103,35 @@ def evaluate(
         findings.append("已有防火墙规则：" + "；".join(rules))
     if will_harden and f.admin_exists:
         findings.append("用户 admin 已存在")
-    if will_harden and f.port_line:
-        findings.append("sshd_config 里写死了 SSH 端口，无法安全地改端口")
+    if will_harden:
+        findings.extend(_sshd_findings(f.sshd_line))
     if will_harden and ssh_port != 22:  # harden-stage.sh keeps 22 open next to the new port
         findings.append("SSH 不在 22 端口，无法安全加固")
     return findings
+
+
+def _sshd_findings(lines: list[str]) -> list[str]:
+    """The SSH setting lines harden-stage.sh cannot take over.
+
+    It comments out the others: a setting inside a Match block applies only to some logins, and
+    a ListenAddress with its own port keeps that port open whatever Port says.
+    """
+    findings = []
+    for line in lines:
+        in_match, place, setting = (line.split(" ", 2) + ["", ""])[:3]
+        keyword, _, value = setting.replace("=", " ", 1).partition(" ")
+        if in_match == "1":
+            findings.append(f"sshd 配置的 Match 块里设置了 {keyword}（{place}），无法安全加固")
+        elif keyword.lower() == "listenaddress" and _has_port((value.split() or [""])[0]):
+            findings.append(f"sshd 的 ListenAddress 自带端口（{place}：{setting}），无法安全地改端口")
+    return findings
+
+
+def _has_port(address: str) -> bool:
+    """Whether a ListenAddress value names a port: "[::1]:22" and "0.0.0.0:22" do, "::" does not."""
+    if address.startswith("["):
+        return "]:" in address
+    return address.count(":") == 1
 
 
 def _number(key: str, value: str) -> int:

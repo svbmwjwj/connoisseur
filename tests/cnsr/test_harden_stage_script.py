@@ -165,6 +165,108 @@ def test_a_rerun_with_another_port_replaces_the_drop_in(fresh):
     assert fresh.read(DROP_IN) == f"Port 22\nPort {PORT}\n"
 
 
+# --- vendor SSH settings ------------------------------------------------------------------
+
+SSHD_CONFIG = "/etc/ssh/sshd_config"
+KEPT = "/etc/ssh/sshd_config.d/11-cnsr-kept.conf"
+ORIGINALS = "/opt/cnsr/sshd-original"
+# The sshd_config of akile's Debian 13 image: the stock file plus three settings.
+VENDOR_CONFIG = (
+    "Include /etc/ssh/sshd_config.d/*.conf\n\nPort 22\n#AddressFamily any\nPermitRootLogin yes\n"
+    "UsePAM yes\nPasswordAuthentication yes\n"
+)
+VENDOR_EFFECTIVE = f"port 22\nport {PORT}\npermitrootlogin yes\npasswordauthentication yes\nkbdinteractiveauthentication no\n"
+
+
+@pytest.fixture
+def vendor(fresh):
+    fresh.write(SSHD_CONFIG, VENDOR_CONFIG, mode=0o600)
+    fresh.answer("sshd -T", VENDOR_EFFECTIVE)
+    return fresh
+
+
+def test_vendor_settings_are_commented_out_and_their_logins_kept_after_the_drop_in(vendor):
+    out = stage(vendor)
+    assert (out.status, out.stderr) == (0, "")
+    assert vendor.read(SSHD_CONFIG) == (
+        "Include /etc/ssh/sshd_config.d/*.conf\n\n# cnsr: Port 22\n#AddressFamily any\n# cnsr: PermitRootLogin yes\n"
+        "UsePAM yes\n# cnsr: PasswordAuthentication yes\n"
+    )
+    assert vendor.mode(SSHD_CONFIG) == 0o600
+    assert vendor.read(KEPT) == "PermitRootLogin yes\nPasswordAuthentication yes\n"
+    assert vendor.read(f"{ORIGINALS}/sshd_config") == VENDOR_CONFIG
+    assert vendor.read(DROP_IN) == f"Port 22\nPort {PORT}\n"
+    assert vendor.leftovers() == []
+
+
+def test_the_current_settings_are_read_before_anything_changes(vendor):
+    out = stage(vendor)
+    assert out.calls == [*FRESH[: FRESH.index("sshd -t")], "sshd -T", *FRESH[FRESH.index("sshd -t"):]]
+
+
+def test_kept_logins_take_the_value_sshd_used_not_the_text_of_the_line(vendor):
+    vendor.write(SSHD_CONFIG, "PermitRootLogin without-password\nChallengeResponseAuthentication yes\n")
+    vendor.answer("sshd -T", f"port 22\nport {PORT}\npermitrootlogin prohibit-password\nkbdinteractiveauthentication yes\n")
+    assert stage(vendor).status == 0
+    assert vendor.read(KEPT) == "PermitRootLogin prohibit-password\nKbdInteractiveAuthentication yes\n"
+
+
+def test_drop_ins_of_the_vendor_are_taken_over_and_listen_addresses_kept(vendor):
+    vendor.write(SSHD_CONFIG, "Include /etc/ssh/sshd_config.d/*.conf\nListenAddress 0.0.0.0\nlistenaddress=::\n")
+    vendor.write("/etc/ssh/sshd_config.d/50-cloud-init.conf", "PasswordAuthentication=yes\n")
+    vendor.write("/etc/ssh/sshd_config.d/README", "Port 1\n")
+    assert stage(vendor).status == 0
+    assert vendor.read("/etc/ssh/sshd_config.d/50-cloud-init.conf") == "# cnsr: PasswordAuthentication=yes\n"
+    assert vendor.read(f"{ORIGINALS}/sshd_config.d/50-cloud-init.conf") == "PasswordAuthentication=yes\n"
+    assert vendor.read("/etc/ssh/sshd_config.d/README") == "Port 1\n"
+    assert vendor.read(KEPT) == "ListenAddress 0.0.0.0\nListenAddress ::\nPasswordAuthentication yes\n"
+
+
+def test_only_ports_taken_over_write_no_kept_file(vendor):
+    vendor.write(SSHD_CONFIG, "Port 22\r\nUsePAM yes\r\n")
+    assert stage(vendor).status == 0
+    assert vendor.path(SSHD_CONFIG).read_bytes() == b"# cnsr: Port 22\r\nUsePAM yes\r\n"
+    assert not vendor.path(KEPT).exists()
+
+
+def test_settings_inside_a_match_block_are_left_alone(vendor):
+    config = "Port 22\nMatch User backup\n    PasswordAuthentication yes\n"
+    vendor.write(SSHD_CONFIG, config)
+    assert stage(vendor).status == 0
+    assert vendor.read(SSHD_CONFIG) == "# cnsr: Port 22\nMatch User backup\n    PasswordAuthentication yes\n"
+
+
+def test_a_rerun_keeps_the_first_original_and_the_kept_file(vendor):
+    stage(vendor)
+    out = stage(vendor)
+    assert (out.status, out.stderr) == (0, "")
+    assert vendor.read(f"{ORIGINALS}/sshd_config") == VENDOR_CONFIG
+    assert vendor.read(KEPT) == "PermitRootLogin yes\nPasswordAuthentication yes\n"
+    assert "# cnsr: # cnsr:" not in vendor.read(SSHD_CONFIG)
+
+
+def test_a_rerun_after_a_new_vendor_line_adds_it_once(vendor):
+    stage(vendor)
+    vendor.write("/etc/ssh/sshd_config.d/60-late.conf", "PermitRootLogin no\nKbdInteractiveAuthentication no\n")
+    assert stage(vendor).status == 0
+    assert vendor.read(KEPT) == "PermitRootLogin yes\nPasswordAuthentication yes\nKbdInteractiveAuthentication no\n"
+
+
+def test_a_failing_sshd_t_leaves_the_vendor_files_alone(vendor):
+    vendor.answer("sshd -T", status=1)
+    out = stage(vendor)
+    assert out.status == 1 and "sshd -T" in out.stderr
+    assert vendor.read(SSHD_CONFIG) == VENDOR_CONFIG
+    assert not vendor.path(ORIGINALS).exists() and not vendor.path(DROP_IN).exists()
+
+
+def test_stage_stops_when_sshd_would_listen_on_another_port(vendor):
+    vendor.answer("sshd -T", f"port 22\nport {PORT}\nport 2222\n")
+    out = stage(vendor)
+    assert out.status == 1 and "2222" in out.stderr
+    assert out.calls[-1] == "sshd -T"
+
+
 # --- failures ----------------------------------------------------------------------------
 
 

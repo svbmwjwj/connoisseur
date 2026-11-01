@@ -20,10 +20,13 @@
 #   udp_listen (repeated) local address of every UDP socket bound for listening
 #   containers           running docker containers
 #   fw       (repeated) ufw rules when ufw is active, else one summary line each for nft and
-#            iptables when they hold more than an empty default ruleset
+#            iptables when they hold more than an empty default ruleset; fail2ban's own tables
+#            and chains (f2b-*) only hold its bans and do not count
 #   admin_exists         0 or 1
-#   port_line (repeated) uncommented Port lines of sshd_config, then of sshd_config.d/*.conf
-#            (cnsr's own 10-cnsr.conf excluded)
+#   sshd_line (repeated) every line of sshd_config, then of sshd_config.d/*.conf, that sets one
+#            of the settings cnsr's drop-ins decide, as "<in_match> <file>:<line> <words>":
+#            <in_match> is 1 after a Match line of the same file, else 0 (cnsr's own
+#            10-cnsr.conf and 11-cnsr-kept.conf are skipped)
 #   ipv6                 first stable global IPv6 address, empty when none
 
 export LC_ALL=C
@@ -35,6 +38,7 @@ OS_RELEASE=${PREFLIGHT_OS_RELEASE:-/etc/os-release}
 SSHD_CONFIG=${PREFLIGHT_SSHD_CONFIG:-/etc/ssh/sshd_config}
 SSHD_CONFIG_D=${PREFLIGHT_SSHD_CONFIG_D:-/etc/ssh/sshd_config.d}
 CNSR_DROP_IN=10-cnsr.conf
+CNSR_KEPT=11-cnsr-kept.conf
 PROBE_SECONDS=20
 
 # emit <key> <value>: one fact per line, so the value must stay on one line.
@@ -121,12 +125,18 @@ ufw_rules() {
 }
 
 # Counts the rules of an `nft list ruleset`: every line inside a chain except its
-# declaration, plus one for a base chain whose policy is not accept. Sets are skipped.
+# declaration, plus one for a base chain whose policy is not accept. Sets are skipped, and so
+# are fail2ban's tables (f2b-table by default), which cnsr's own fail2ban takes over.
 nft_summary() {
-    local line words in_chain=0 count=0
+    local line words in_chain=0 in_f2b=0 count=0
     while IFS= read -r line; do
         words=($line)
         line="${words[*]}"
+        case "$line" in
+            "table "*" f2b-"*) in_f2b=1 ;;
+            "table "*) in_f2b=0 ;;
+        esac
+        [ "$in_f2b" = 0 ] || continue
         case "$line" in
             "chain "*) in_chain=1 ;;
             "}") in_chain=0 ;;
@@ -140,12 +150,14 @@ nft_summary() {
     fi
 }
 
-# Counts -A rules and DROP policies over iptables and ip6tables.
+# Counts -A rules and DROP policies over iptables and ip6tables. fail2ban's chains (f2b-<jail>)
+# and the rules that jump to them do not count.
 iptables_summary() {
     local line tool count=0
     for tool in iptables-save ip6tables-save; do
         while IFS= read -r line; do
             case "$line" in
+                "-A f2b-"* | "-A "*" -j f2b-"*) ;;
                 "-A "* | ":"*" DROP "*) count=$((count + 1)) ;;
             esac
         done < <(probe "$tool" 2>/dev/null)
@@ -171,21 +183,40 @@ admin() {
     fi
 }
 
-# Port lines of the main file, then of the drop-ins it includes. A file that is missing or
-# unreadable (also the unexpanded pattern when there is no drop-in) just gives no lines. The
-# drop-in cnsr writes when it changes the port is skipped, so a rerun does not see its own work.
-port_lines() {
-    local line words file files
+# The lines of the main file, then of the drop-ins it includes, that set a setting
+# harden-stage.sh takes over. A file that is missing or unreadable (also the unexpanded pattern
+# when there is no drop-in) just gives no lines. cnsr's own drop-ins are skipped, so a rerun
+# does not see its own work.
+sshd_lines() {
+    local file files name
     set +f
     files=("$SSHD_CONFIG_D"/*.conf)
     set -f
     for file in "$SSHD_CONFIG" "${files[@]}"; do
-        [ "${file##*/}" != "$CNSR_DROP_IN" ] || continue
-        while IFS= read -r line; do
-            words=($line)
-            emit port_line "${words[*]}"
-        done < <(grep -iE '^[[:space:]]*port([[:space:]]|=)' "$file" 2>/dev/null)
+        name=${file##*/}
+        [ "$name" != "$CNSR_DROP_IN" ] && [ "$name" != "$CNSR_KEPT" ] || continue
+        [ -r "$file" ] || continue
+        managed_lines "$file"
     done
+}
+
+# managed_lines <file>: keywords are case-insensitive and may be followed by "=".
+managed_lines() {
+    local line words key number=0 in_match=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        number=$((number + 1))
+        words=(${line%$'\r'})
+        [ "${#words[@]}" -gt 0 ] || continue
+        key=${words[0]%%=*}
+        shopt -s nocasematch
+        case "$key" in
+            match) in_match=1 ;;
+            port | listenaddress | permitrootlogin | passwordauthentication | kbdinteractiveauthentication | challengeresponseauthentication)
+                emit sshd_line "$in_match $1:$number ${words[*]}"
+                ;;
+        esac
+        shopt -u nocasematch
+    done <"$1"
 }
 
 # The first global address that is not temporary, deprecated or unique-local (fc00::/7).
@@ -221,7 +252,7 @@ main() {
     containers
     firewall
     admin
-    port_lines
+    sshd_lines
     first_ipv6
 }
 

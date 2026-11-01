@@ -13,8 +13,9 @@
 #   2. install ufw, fail2ban, python3-systemd, unattended-upgrades and sudo when missing
 #   3. user admin with the key; passwordless sudo, checked by visudo before it is installed
 #   4. automatic security updates (/etc/apt/apt.conf.d/20auto-upgrades)
-#   5. cnsr's sshd drop-in with Port 22 and Port <new_port>; SSH restarts only after sshd -t
-#      accepts it (otherwise the previous drop-in comes back) and sshd -T shows the new port
+#   5. the SSH settings cnsr decides are taken over (see take_over_settings), then cnsr's sshd
+#      drop-in with Port 22 and Port <new_port>; SSH restarts only after sshd -t accepts it
+#      (otherwise the previous drop-in comes back) and sshd -T shows exactly those two ports
 #   6. ufw allows 22/tcp, <new_port>/tcp and the <app_ports>, then denies other incoming
 #      traffic and is enabled; the allow rules come first so that 22 is never shut. When ufw
 #      was off, /opt/cnsr/.ufw-enabled-by-cnsr records that cnsr turned it on, so that
@@ -48,7 +49,11 @@ ADMIN_HOME=/home/admin
 REVERT_PROGRAM=/usr/local/sbin/cnsr-harden-revert
 SUDOERS=/etc/sudoers.d/90-cnsr-admin
 AUTO_UPGRADES=/etc/apt/apt.conf.d/20auto-upgrades
+SSHD_CONFIG=/etc/ssh/sshd_config
+SSHD_DIR=/etc/ssh/sshd_config.d
 DROP_IN=/etc/ssh/sshd_config.d/10-cnsr.conf
+KEPT=/etc/ssh/sshd_config.d/11-cnsr-kept.conf
+ORIGINALS=/opt/cnsr/sshd-original
 JAIL=/etc/fail2ban/jail.d/cnsr.local
 UFW_MARKER=/opt/cnsr/.ufw-enabled-by-cnsr
 UFW_PORTS=/opt/cnsr/.ufw-ports-by-cnsr
@@ -200,13 +205,134 @@ restart_ssh() {
 
 # A sshd_config without the Include of sshd_config.d would accept the drop-in and ignore it.
 listen_on_both() {
+    local line ports="" seen=0
     set_drop_in "Port 22
 Port $1
 " || exit 1
-    if ! sshd -T | grep -x "port $1" >/dev/null; then
-        fail "sshd 没有读取 /etc/ssh/sshd_config.d 里的设置，无法安全地改 SSH 端口。"
-    fi
+    while read -r line; do
+        case "$line" in
+            "port $1") seen=1 ;;
+            "port 22") ;;
+            port\ *) ports="$ports ${line#port }" ;;
+        esac
+    done < <(sshd -T)
+    [ "$seen" = 1 ] || fail "sshd 没有读取 /etc/ssh/sshd_config.d 里的设置，无法安全地改 SSH 端口。"
+    [ -z "$ports" ] || fail "sshd 还会监听 22 和新端口以外的端口：${ports# }，无法安全地改 SSH 端口。"
     restart_ssh
+}
+
+# The settings cnsr's drop-in decides once harden-cut.sh has run. Port and ListenAddress add up
+# over every file sshd reads, so a vendor's "Port 22" keeps 22 open whatever the drop-in says;
+# the login settings take their first value, which may come before the drop-in. So lines that
+# set them anywhere else are commented out with a "# cnsr: " prefix, after each file was copied
+# to ORIGINALS (once) for `harden-revert.sh all`. Lines inside a Match block stay: preflight
+# turns such a server away. What the login settings were until now, as sshd -T says, and the
+# ListenAddress lines (preflight allows them only without a port) go to KEPT, read right after
+# the drop-in, so that logins work as before until harden-cut.sh writes the final drop-in.
+take_over_settings() {
+    local file files=("$SSHD_CONFIG" "$SSHD_DIR"/*.conf) found=() effective kept
+    for file in "${files[@]}"; do
+        case "${file##*/}" in "${DROP_IN##*/}" | "${KEPT##*/}") continue ;; esac
+        [ -f "$file" ] || continue
+        TAKEN=""
+        read_settings "$file" >/dev/null
+        [ -z "$TAKEN" ] || found+=("$file")
+    done
+    [ "${#found[@]}" -gt 0 ] || return 0
+    mkdir -p -m 0755 /run/sshd
+    effective=$(sshd -T) || fail "sshd -T 无法读出当前的 SSH 设置，没有改动 SSH 设置。"
+    TAKEN=""
+    for file in "${found[@]}"; do
+        save_original "$file" || fail "无法备份 $file，没有改动它。"
+        comment_out "$file" || fail "无法改写 $file。"
+    done
+    kept=$(kept_settings "$effective")
+    if [ -n "$kept" ]; then
+        mkdir -p "${KEPT%/*}" && put "$KEPT" 644 "$kept
+" || fail "无法写入 $KEPT。"
+    fi
+}
+
+# read_settings <file>: print <file> with the lines that set a taken-over setting outside a
+# Match block commented out, and add those lines to TAKEN, one per line.
+read_settings() {
+    local line words key in_match=0
+    shopt -s nocasematch
+    while IFS= read -r line || [ -n "$line" ]; do
+        read -r -a words <<<"${line%$'\r'}"
+        key=${words[0]:-}
+        key=${key%%=*}
+        case "$key" in
+            match) in_match=1 ;;
+            port | listenaddress | permitrootlogin | passwordauthentication | kbdinteractiveauthentication | challengeresponseauthentication)
+                if [ "$in_match" = 0 ]; then
+                    TAKEN="$TAKEN${line%$'\r'}
+"
+                    printf '# cnsr: %s\n' "$line"
+                    continue
+                fi
+                ;;
+        esac
+        printf '%s\n' "$line"
+    done <"$1"
+    shopt -u nocasematch
+}
+
+save_original() {
+    local saved="$ORIGINALS/${1#/etc/ssh/}"
+    [ ! -e "$saved" ] || return 0
+    mkdir -p "${saved%/*}" && cp -p "$1" "$saved"
+}
+
+# The file keeps its owner and mode: the new text goes into a copy of it, which replaces it.
+comment_out() {
+    local next="$1.cnsr-new"
+    if ! { cp -p "$1" "$next" && read_settings "$1" >"$next" && mv -f "$next" "$1"; }; then
+        rm -f "$next"
+        return 1
+    fi
+}
+
+# kept_settings <sshd -T output>: KEPT as it was, plus the login settings in TAKEN with the
+# value sshd used and the ListenAddress lines in TAKEN, each one only once.
+kept_settings() {
+    local kept line words key name value
+    kept=$(cat "$KEPT" 2>/dev/null || true)
+    shopt -s nocasematch
+    while IFS= read -r line; do
+        read -r -a words <<<"${line/=/ }"
+        key=${words[0]:-}
+        case "$key" in
+            listenaddress) name=ListenAddress value="${words[*]:1}" ;;
+            permitrootlogin) name=PermitRootLogin value=$(effective_value "$1" permitrootlogin) ;;
+            passwordauthentication) name=PasswordAuthentication value=$(effective_value "$1" passwordauthentication) ;;
+            kbdinteractiveauthentication | challengeresponseauthentication)
+                name=KbdInteractiveAuthentication value=$(effective_value "$1" kbdinteractiveauthentication)
+                ;;
+            *) continue ;;
+        esac
+        [ -n "$value" ] || continue
+        if [ "$name" = ListenAddress ]; then
+            printf '%s\n' "$kept" | grep -qixF -- "$name $value" && continue
+        else
+            printf '%s\n' "$kept" | grep -qi -- "^$name " && continue
+        fi
+        kept="${kept:+$kept
+}$name $value"
+    done <<<"$TAKEN"
+    shopt -u nocasematch
+    printf '%s' "$kept"
+}
+
+# effective_value <sshd -T output> <key>
+effective_value() {
+    local key value
+    while read -r key value; do
+        if [ "$key" = "$2" ]; then
+            printf '%s' "$value"
+            return
+        fi
+    done <<<"$1"
 }
 
 # firewall <new_port> <app_ports>: <app_ports> is a space-separated list like "443/tcp 443/udp".
@@ -256,6 +382,7 @@ main() {
     add_admin "$pubkey"
     mkdir -p "${AUTO_UPGRADES%/*}"
     put "$AUTO_UPGRADES" 644 "$AUTO_UPGRADES_TEXT"
+    take_over_settings
     listen_on_both "$new_port"
     firewall "$new_port" "$app_ports"
     fail2ban_jail "$new_port"

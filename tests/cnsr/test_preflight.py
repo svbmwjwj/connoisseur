@@ -34,16 +34,16 @@ def test_parse_repeated_keys():
 
 
 def test_parse_converts_types():
-    f = parse_facts(with_extra("fw=22/tcp ALLOW Anywhere\nfw=nft: 3 rules\nport_line=Port 22\n").replace("admin_exists=0", "admin_exists=1"))
+    f = parse_facts(with_extra("fw=22/tcp ALLOW Anywhere\nfw=nft: 3 rules\nsshd_line=0 /etc/ssh/sshd_config:14 Port 22\n").replace("admin_exists=0", "admin_exists=1"))
     assert (f.os_id, f.os_version, f.arch, f.user) == ("debian", "12", "x86_64", "root")
     assert f.containers == 0 and f.admin_exists is True
-    assert f.fw == ["22/tcp ALLOW Anywhere", "nft: 3 rules"] and f.port_line == ["Port 22"]
+    assert f.fw == ["22/tcp ALLOW Anywhere", "nft: 3 rules"] and f.sshd_line == ["0 /etc/ssh/sshd_config:14 Port 22"]
 
 
 def test_parse_defaults_when_the_output_is_empty():
     assert parse_facts("") == Facts()
     assert Facts() == Facts(os_id="", os_version="", arch="", user="", listen=[], containers=0, fw=[],
-                            admin_exists=False, port_line=[], ipv6="")
+                            admin_exists=False, sshd_line=[], ipv6="")
 
 
 def test_parse_tolerates_crlf_blank_lines_noise_and_empty_values():
@@ -53,8 +53,8 @@ def test_parse_tolerates_crlf_blank_lines_noise_and_empty_values():
 
 
 def test_parse_keeps_everything_after_the_first_equals_sign_and_the_last_scalar_wins():
-    f = parse_facts("port_line=Port=2222\nos_id=ubuntu\nos_id=debian\n")
-    assert f.port_line == ["Port=2222"] and f.os_id == "debian"
+    f = parse_facts("sshd_line=0 /etc/ssh/sshd_config:3 Port=2222\nos_id=ubuntu\nos_id=debian\n")
+    assert f.sshd_line == ["0 /etc/ssh/sshd_config:3 Port=2222"] and f.os_id == "debian"
 
 
 @pytest.mark.parametrize("line", ["containers=two", "containers=", "containers=-1", "containers=²", "admin_exists=yes", "admin_exists=2"])
@@ -80,7 +80,7 @@ def test_every_finding_with_exact_text_in_table_order():
     text = (
         "os_id=debian\nos_version=11\narch=aarch64\nuser=root\n"
         "listen=0.0.0.0:22\nlisten=0.0.0.0:443\nlisten=[::]:8080\nlisten=0.0.0.0:3306\n"
-        "containers=2\nfw=3306/tcp ALLOW Anywhere\nfw=nft: 12 rules\nadmin_exists=1\nport_line=Port 22\n"
+        "containers=2\nfw=3306/tcp ALLOW Anywhere\nfw=nft: 12 rules\nadmin_exists=1\nsshd_line=1 /etc/ssh/sshd_config:90 PermitRootLogin yes\n"
     )
     assert check(text) == [
         UNSUPPORTED.format("debian 11 aarch64"),
@@ -89,7 +89,7 @@ def test_every_finding_with_exact_text_in_table_order():
         "已有 2 个容器在运行",
         "已有防火墙规则：3306/tcp ALLOW Anywhere；nft: 12 rules",
         "用户 admin 已存在",
-        "sshd_config 里写死了 SSH 端口，无法安全地改端口",
+        "sshd 配置的 Match 块里设置了 PermitRootLogin（/etc/ssh/sshd_config:90），无法安全加固",
     ]
 
 
@@ -100,7 +100,8 @@ def test_every_finding_with_exact_text_in_table_order():
     ("listen=0.0.0.0:443\n", "443 端口已被占用"),
     ("listen=0.0.0.0:8080\n", "除 SSH 外还有其他服务在监听：8080"),
     ("fw=ALLOW 3306/tcp\n", "已有防火墙规则"),
-    ("port_line=Port 22\n", "写死了 SSH 端口"),
+    ("sshd_line=1 /etc/ssh/sshd_config:90 PasswordAuthentication yes\n", "Match 块里设置了 PasswordAuthentication（/etc/ssh/sshd_config:90）"),
+    ("sshd_line=0 /etc/ssh/sshd_config:5 ListenAddress 0.0.0.0:22\n", "ListenAddress 自带端口"),
 ])
 def test_findings(extra, needle):
     out = evaluate(parse_facts(with_extra(extra)), ssh_port=22, will_harden=True, app_ports=PORTS)
@@ -134,9 +135,26 @@ def test_hardening_needs_ssh_on_port_22():
 
 
 def test_aws_skips_harden_only_checks():
-    text = with_extra("port_line=Port 2222\n").replace("admin_exists=0", "admin_exists=1")
+    text = with_extra("sshd_line=1 /etc/ssh/sshd_config:90 Port 2222\n").replace("admin_exists=0", "admin_exists=1")
     assert check(text, will_harden=False) == []
-    assert check(text, will_harden=True) == ["用户 admin 已存在", "sshd_config 里写死了 SSH 端口，无法安全地改端口"]
+    assert check(text, will_harden=True) == ["用户 admin 已存在", "sshd 配置的 Match 块里设置了 Port（/etc/ssh/sshd_config:90），无法安全加固"]
+
+
+@pytest.mark.parametrize("setting", [
+    "Port 22", "port=22", "PermitRootLogin yes", "PasswordAuthentication yes", "KbdInteractiveAuthentication yes",
+    "ChallengeResponseAuthentication no", "ListenAddress 0.0.0.0", "ListenAddress ::", "ListenAddress [::]",
+    "ListenAddress 192.0.2.1 rdomain vrf1",
+])
+def test_settings_harden_stage_comments_out_are_not_findings(setting):
+    assert check(with_extra(f"sshd_line=0 /etc/ssh/sshd_config:14 {setting}\n"), will_harden=True) == []
+
+
+@pytest.mark.parametrize("address", ["0.0.0.0:22", "[::]:22", "ListenAddress=192.0.2.1:2222"])
+def test_a_listen_address_with_a_port_is_a_finding(address):
+    setting = address if address.startswith("ListenAddress") else f"ListenAddress {address}"
+    assert check(with_extra(f"sshd_line=0 /etc/ssh/sshd_config.d/50-x.conf:2 {setting}\n"), will_harden=True) == [
+        f"sshd 的 ListenAddress 自带端口（/etc/ssh/sshd_config.d/50-x.conf:2：{setting}），无法安全地改端口"
+    ]
 
 
 # --- evaluate: listeners -----------------------------------------------------------------

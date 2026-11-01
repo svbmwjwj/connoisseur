@@ -225,7 +225,7 @@ def test_active_ufw_with_no_rules_prints_nothing(run):
 
 def test_inactive_ufw_falls_through_to_nft_and_iptables(run):
     out = run({"ufw status": "Status: inactive\n", "nft list ruleset": NFT_RULES, "iptables-save": IPTABLES_RULES})
-    assert out.facts("fw=") == ["fw=nft: 4 rules", "fw=iptables: 3 rules"]
+    assert out.facts("fw=") == ["fw=nft: 4 rules", "fw=iptables: 1 rules"]
 
 
 def test_ufw_manages_nft_and_iptables_so_only_its_rules_are_reported(run):
@@ -243,14 +243,41 @@ def test_nft_rules_are_summarised_in_one_line(run):
 
 
 def test_iptables_rules_and_drop_policies_are_summarised_in_one_line(run):
-    assert run({"iptables-save": IPTABLES_RULES}).facts("fw=") == ["fw=iptables: 3 rules"]
+    assert run({"iptables-save": IPTABLES_RULES}).facts("fw=") == ["fw=iptables: 1 rules"]
 
 
 def test_ip6tables_rules_count_towards_the_iptables_summary(run):
     ipv6_rules = "*filter\n:INPUT ACCEPT [0:0]\n-A INPUT -p tcp --dport 22 -j ACCEPT\nCOMMIT\n"
-    assert run({"iptables-save": IPTABLES_RULES, "ip6tables-save": ipv6_rules}).facts("fw=") == ["fw=iptables: 4 rules"]
+    assert run({"iptables-save": IPTABLES_RULES, "ip6tables-save": ipv6_rules}).facts("fw=") == ["fw=iptables: 2 rules"]
     assert run({"ip6tables-save": ipv6_rules}).facts("fw=") == ["fw=iptables: 1 rules"]
 
+
+
+# The ruleset of akile's Debian 13 image, whose fail2ban had banned one address.
+NFT_FAIL2BAN = """table inet f2b-table {
+\tset addr-set-sshd {
+\t\ttype ipv4_addr
+\t\telements = { 198.51.100.7 }
+\t}
+
+\tchain f2b-chain {
+\t\ttype filter hook input priority filter - 1; policy accept;
+\t\ttcp dport 22 ip saddr @addr-set-sshd reject with icmp port-unreachable
+\t}
+}
+"""
+
+
+def test_the_bans_of_a_preinstalled_fail2ban_are_not_firewall_rules(run):
+    assert run({"nft list ruleset": NFT_FAIL2BAN}).lines == CLEAN_LINES
+    assert run({"nft list ruleset": NFT_FAIL2BAN + NFT_RULES}).facts("fw=") == ["fw=nft: 4 rules"]
+    assert run({"nft list ruleset": NFT_RULES + NFT_FAIL2BAN}).facts("fw=") == ["fw=nft: 4 rules"]
+
+
+def test_fail2ban_chains_and_the_jumps_to_them_are_not_iptables_rules(run):
+    rules = ":INPUT ACCEPT [0:0]\n:f2b-sshd - [0:0]\n-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd\n"
+    rules += "-A f2b-sshd -s 198.51.100.7/32 -j REJECT --reject-with icmp-port-unreachable\n-A f2b-sshd -j RETURN\n"
+    assert run({"iptables-save": f"*filter\n{rules}COMMIT\n"}).lines == CLEAN_LINES
 
 # --- admin, sshd_config, ipv6 ------------------------------------------------------------
 
@@ -261,43 +288,63 @@ def test_admin_exists(run):
     assert "admin_exists=0" in run().lines
 
 
-def test_uncommented_port_lines_are_printed_with_single_spaces(run):
+def settings(out) -> list[str]:
+    """The sshd_line facts, with the temporary directory left out of the file names."""
+    return [line.replace(f"{out.base}/", "") for line in out.facts("sshd_line=")]
+
+
+def test_lines_setting_a_managed_setting_are_printed_with_their_place_and_single_spaces(run):
     out = run(sshd_config=SSHD_CONFIG)
-    assert out.facts("port_line=") == ["port_line=Port 2222", "port_line=port 2200", "port_line=Port=2300"]
-    assert "sshd_config" in evaluate(facts_of(out), ssh_port=22, will_harden=True, app_ports=PORTS)[0]
+    assert settings(out) == [
+        "sshd_line=0 sshd_config:5 Port 2222", "sshd_line=0 sshd_config:6 port 2200", "sshd_line=0 sshd_config:7 Port=2300",
+        "sshd_line=0 sshd_config:11 PermitRootLogin prohibit-password",
+    ]  # fmt: skip
+    assert evaluate(facts_of(out), ssh_port=22, will_harden=True, app_ports=PORTS) == []
 
 
-def test_port_lines_in_sshd_config_d_drop_ins_count_after_those_of_sshd_config(run):
+def test_every_managed_setting_is_reported_whatever_its_case(run):
+    config = ("PORT 22\nlistenaddress 0.0.0.0\nPermitRootLogin yes\nPasswordAuthentication=yes\n"
+              "KbdInteractiveAuthentication no\nChallengeResponseAuthentication no\nUsePAM yes\n")
+    assert [line.split(" ", 2)[2] for line in settings(run(sshd_config=config))] == config.splitlines()[:6]
+
+
+def test_lines_after_a_match_line_are_marked_as_inside_it(run):
+    out = run(sshd_config="Port 22\nMatch User backup\n    PasswordAuthentication yes\n", sshd_config_d={"50-x.conf": "PermitRootLogin yes\n"})
+    assert settings(out) == [
+        "sshd_line=0 sshd_config:1 Port 22", "sshd_line=1 sshd_config:3 PasswordAuthentication yes",
+        "sshd_line=0 sshd_config.d/50-x.conf:1 PermitRootLogin yes",
+    ]  # fmt: skip
+    assert evaluate(facts_of(out), ssh_port=22, will_harden=True, app_ports=PORTS) == [
+        f"sshd 配置的 Match 块里设置了 PasswordAuthentication（{out.base}/sshd_config:3），无法安全加固"
+    ]
+
+
+def test_drop_ins_count_after_sshd_config_in_name_order_and_only_conf_files(run):
     drop_ins = {"50-vendor.conf": "# Port 2200\nPort 22\nPasswordAuthentication yes\n", "20-first.conf": "port\t2022\n", "README": "Port 1\n",
                 "60-old.conf.bak": "Port 3\n"}
-    out = run(sshd_config=SSHD_CONFIG, sshd_config_d=drop_ins)
-    assert out.facts("port_line=") == [
-        "port_line=Port 2222", "port_line=port 2200", "port_line=Port=2300", "port_line=port 2022", "port_line=Port 22",
+    out = run(sshd_config="Port 2222\n", sshd_config_d=drop_ins)
+    assert settings(out) == [
+        "sshd_line=0 sshd_config:1 Port 2222", "sshd_line=0 sshd_config.d/20-first.conf:1 port 2022",
+        "sshd_line=0 sshd_config.d/50-vendor.conf:2 Port 22", "sshd_line=0 sshd_config.d/50-vendor.conf:3 PasswordAuthentication yes",
     ]  # fmt: skip
 
 
-def test_a_vendor_drop_in_with_port_22_is_a_finding(run):
-    out = run(sshd_config_d={"50-cloud-init.conf": "Port 22\n"})
-    assert out.facts("port_line=") == ["port_line=Port 22"]
-    assert "sshd_config" in evaluate(facts_of(out), ssh_port=22, will_harden=True, app_ports=PORTS)[0]
-
-
-def test_the_cnsr_drop_in_is_not_a_hard_coded_port(run):
-    out = run(sshd_config_d={"10-cnsr.conf": "Port 22\nPort 23456\n"})
-    assert out.facts("port_line=") == [] and out.lines == CLEAN_LINES
+def test_the_cnsr_drop_ins_are_skipped(run):
+    out = run(sshd_config_d={"10-cnsr.conf": "Port 22\nPort 23456\n", "11-cnsr-kept.conf": "PermitRootLogin yes\n"})
+    assert settings(out) == [] and out.lines == CLEAN_LINES
 
 
 def test_drop_in_files_with_glob_characters_in_their_lines_are_read_literally(run):
-    assert run(sshd_config_d={"50-x.conf": "Port *\n"}).facts("port_line=") == ["port_line=Port *"]
+    assert settings(run(sshd_config_d={"50-x.conf": "Port *\n"})) == ["sshd_line=0 sshd_config.d/50-x.conf:1 Port *"]
 
 
 def test_wildcards_in_the_output_are_not_expanded_to_file_names(run):
     out = run({"ufw status": UFW_ACTIVE + "Anywhere DENY *\n"}, sshd_config="Port *\n")
-    assert "fw=Anywhere DENY *" in out.lines and out.facts("port_line=") == ["port_line=Port *"]
+    assert "fw=Anywhere DENY *" in out.lines and settings(out) == ["sshd_line=0 sshd_config:1 Port *"]
 
 
-def test_port_line_with_windows_line_endings_keeps_the_carriage_return_out_of_the_fact(run):
-    assert run(sshd_config="Port 2222\r\n").facts("port_line=") == ["port_line=Port 2222"]
+def test_a_line_with_windows_line_endings_keeps_the_carriage_return_out_of_the_fact(run):
+    assert settings(run(sshd_config="Port 2222\r\n")) == ["sshd_line=0 sshd_config:1 Port 2222"]
 
 
 def test_ipv6_is_the_first_stable_global_address(run):

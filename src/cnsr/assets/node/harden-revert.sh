@@ -9,8 +9,9 @@
 #          drop-in), with the login settings it had before cnsr, and ufw allows 22 again
 #   all    back to before cnsr: the ufw rules for the new ports are deleted (the drop-in's and
 #          the ones listed in /opt/cnsr/.ufw-ports-by-cnsr), ufw is disabled when
-#          cnsr enabled it (/opt/cnsr/.ufw-enabled-by-cnsr, written by harden-stage.sh), and
-#          cnsr's drop-in and fail2ban jail are removed
+#          cnsr enabled it (/opt/cnsr/.ufw-enabled-by-cnsr, written by harden-stage.sh),
+#          the SSH files harden-stage.sh commented lines out of are put back from
+#          /opt/cnsr/sshd-original, and cnsr's drop-ins and fail2ban jail are removed
 #
 # Every step is tried even when an earlier one failed, because getting SSH back matters more
 # than stopping cleanly; the exit status is 1 if anything failed. SSH is restarted only after
@@ -36,6 +37,8 @@ if ! flock -w 60 9 </dev/null; then
 fi
 
 DROP_IN=/etc/ssh/sshd_config.d/10-cnsr.conf
+KEPT=/etc/ssh/sshd_config.d/11-cnsr-kept.conf
+ORIGINALS=/opt/cnsr/sshd-original  # copies of /etc/ssh files, by their path under /etc/ssh
 JAIL=/etc/fail2ban/jail.d/cnsr.local
 UFW_MARKER=/opt/cnsr/.ufw-enabled-by-cnsr
 UFW_PORTS=/opt/cnsr/.ufw-ports-by-cnsr  # the new ports harden-stage.sh opened
@@ -124,6 +127,23 @@ revert_stage() {
     apply_sshd "$content" || failed=1
 }
 
+# The copies go only once every file is back, so a rerun can still restore the rest.
+restore_originals() {
+    local saved target status=0 files=("$ORIGINALS/sshd_config" "$ORIGINALS/sshd_config.d"/*.conf)
+    for saved in "${files[@]}"; do
+        [ -f "$saved" ] || continue
+        target="/etc/ssh/${saved#"$ORIGINALS"/}"
+        if ! { cp -p "$saved" "$target.cnsr-new" && mv -f "$target.cnsr-new" "$target"; }; then
+            rm -f "$target.cnsr-new"
+            warn "没能还原 $target。"
+            status=1
+        fi
+    done
+    rm -f "$KEPT" || status=1
+    [ "$status" = 1 ] || rm -rf "$ORIGINALS" || status=1
+    return "$status"
+}
+
 revert_all() {
     local port seen=" "
     if command -v ufw >/dev/null 2>&1; then
@@ -142,6 +162,7 @@ revert_all() {
             fi
         fi
     fi
+    restore_originals || failed=1
     apply_sshd "" || failed=1
     if [ -f "$JAIL" ]; then
         rm -f "$JAIL" || failed=1
