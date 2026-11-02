@@ -2,7 +2,7 @@
 
 from importlib.metadata import PackageNotFoundError, version
 
-DISTRIBUTION = "snack-connoisseur"
+DISTRIBUTION = "connoisseur"
 
 
 def _installed_version(lookup=version) -> str:
