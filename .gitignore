@@ -6,8 +6,6 @@
 superpowers
 superpowers/
 .notes
-.notes/
-notes/
 
 # Python environment and test caches
 .venv/
