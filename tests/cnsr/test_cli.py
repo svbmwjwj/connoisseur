@@ -76,7 +76,7 @@ def config_home(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("APPDATA", str(tmp_path / "config"))
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
-    return tmp_path / "config" / "cnsr"
+    return tmp_path / "config" / "connoisseur"
 
 
 @pytest.fixture

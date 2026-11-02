@@ -10,23 +10,23 @@ from cnsr.errors import CnsrError
 
 
 def test_config_dir_windows():
-    assert paths.config_dir({"APPDATA": r"C:\Users\a\AppData\Roaming"}, "win32", Path("C:/Users/a")) == Path(r"C:\Users\a\AppData\Roaming") / "cnsr"
+    assert paths.config_dir({"APPDATA": r"C:\Users\a\AppData\Roaming"}, "win32", Path("C:/Users/a")) == Path(r"C:\Users\a\AppData\Roaming") / "connoisseur"
 
 
 def test_config_dir_windows_without_appdata_falls_back_to_home():
-    assert paths.config_dir({}, "win32", Path("/h")) == Path("/h/AppData/Roaming/cnsr")
+    assert paths.config_dir({}, "win32", Path("/h")) == Path("/h/AppData/Roaming/connoisseur")
 
 
 def test_config_dir_respects_xdg():
-    assert paths.config_dir({"XDG_CONFIG_HOME": "/x"}, "linux", Path("/home/a")) == Path("/x/cnsr")
+    assert paths.config_dir({"XDG_CONFIG_HOME": "/x"}, "linux", Path("/home/a")) == Path("/x/connoisseur")
 
 
 def test_config_dir_ignores_empty_xdg():
-    assert paths.config_dir({"XDG_CONFIG_HOME": ""}, "linux", Path("/home/a")) == Path("/home/a/.config/cnsr")
+    assert paths.config_dir({"XDG_CONFIG_HOME": ""}, "linux", Path("/home/a")) == Path("/home/a/.config/connoisseur")
 
 
 def test_config_dir_default_posix():
-    assert paths.config_dir({}, "darwin", Path("/Users/a")) == Path("/Users/a/.config/cnsr")
+    assert paths.config_dir({}, "darwin", Path("/Users/a")) == Path("/Users/a/.config/connoisseur")
 
 
 def test_ssh_paths_live_under_home_ssh():

@@ -10,10 +10,10 @@ def config_dir(env: Mapping[str, str], platform: str, home: Path) -> Path:
     if platform == "win32":
         appdata = env.get("APPDATA")
         base = Path(appdata) if appdata else home / "AppData" / "Roaming"
-        return base / "cnsr"
+        return base / "connoisseur"
     xdg = env.get("XDG_CONFIG_HOME")
     base = Path(xdg) if xdg else home / ".config"
-    return base / "cnsr"
+    return base / "connoisseur"
 
 
 def ssh_config_path(home: Path) -> Path:
