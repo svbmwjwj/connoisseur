@@ -203,13 +203,25 @@ def test_inventory_put_leaves_an_index_that_already_has_the_alias_alone(fake_kv)
     assert written == ["node:jp-1"]
 
 
-def test_inventory_aliases_reads_the_index_and_writes_nothing(fake_kv):
-    fake_kv.data["node:old-1"] = full_node("old-1").to_json()
+def test_inventory_aliases_are_the_records_not_the_index(fake_kv):
+    """The index may name a node already gone; the records say which nodes there are."""
+    fake_kv.data["node:b"] = full_node("b").to_json()
+    fake_kv.data["node:a"] = full_node("a").to_json()
+    fake_kv.data["index:nodes"] = json.dumps(["a", "b", "gone"])
     before = dict(fake_kv.data)
-    assert Inventory(fake_kv).aliases() == ["old-1"]
-    assert fake_kv.data == before
-    fake_kv.data["index:nodes"] = json.dumps(["b", "a"])
     assert Inventory(fake_kv).aliases() == ["a", "b"]
+    assert fake_kv.data == before
+
+
+@pytest.mark.parametrize("stored", [["jp-1"], None])
+def test_inventory_aliases_finds_a_node_the_index_lost_and_indexes_it_again(fake_kv, stored):
+    """Two runs rewriting the index at once can drop a node from it; its record is still there."""
+    fake_kv.data["node:jp-1"] = full_node("jp-1").to_json()
+    fake_kv.data["node:lost"] = full_node("lost").to_json()
+    if stored is not None:
+        fake_kv.data["index:nodes"] = json.dumps(stored)
+    assert Inventory(fake_kv).aliases() == ["jp-1", "lost"]
+    assert index(fake_kv) == ["jp-1", "lost"]
 
 
 def test_inventory_keep_indexed_restores_an_alias_another_run_dropped(fake_kv):

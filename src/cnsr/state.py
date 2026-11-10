@@ -15,8 +15,9 @@ NODE_PREFIX = "node:"
 # The SNI rotation state of one node, owned by the control plane's Worker.
 STATE_PREFIX = "state:"
 # A JSON array of every node's alias. The Worker reads it instead of listing the namespace, which
-# the free plan allows only 1,000 times a day. It may name a node whose record is gone, never
-# the other way round.
+# the free plan allows only 1,000 times a day. It may name a node whose record is gone. It should
+# never miss one, but two runs rewriting it at the same time can drop a node: ``Inventory.aliases``
+# goes by the records and puts such a node back.
 INDEX_KEY = "index:nodes"
 # Region codes that records written before the "country-area" codes may hold, and their new codes.
 LEGACY_REGIONS = {"jp": "jp-tokyo", "us": "us-oregon"}
@@ -139,8 +140,15 @@ class Inventory:
         self._kv.put(NODE_PREFIX + node.alias, node.to_json())
 
     def aliases(self) -> list[str]:
-        """Every node's alias, sorted. Writes nothing; a missing index costs one KV list."""
-        return sorted(self._index()[0])
+        """Every node's alias, sorted, from the records themselves: one KV list.
+
+        A node the index does not name is added to it, so the Worker serves it again.
+        """
+        listed = self._listed()
+        stored = self._stored_index() or set()
+        if not listed <= stored:
+            self._write_index(stored | listed)
+        return sorted(listed)
 
     def keep_indexed(self, alias: str) -> None:
         """Add the alias to the index unless it is there already.
@@ -192,14 +200,25 @@ class Inventory:
         A control plane from before the index, or one whose index is damaged, has its node
         records listed instead: the index written from them then keeps every existing node.
         """
+        stored = self._stored_index()
+        if stored is not None:
+            return stored, True
+        return self._listed(), False
+
+    def _stored_index(self) -> set[str] | None:
+        """The aliases in the stored index; None when there is none or it is damaged."""
         raw = self._kv.get(INDEX_KEY)
         try:
             aliases = json.loads(raw) if raw is not None else None
         except ValueError:
             aliases = None
         if isinstance(aliases, list) and all(isinstance(alias, str) for alias in aliases):
-            return set(aliases), True
-        return {key.removeprefix(NODE_PREFIX) for key in self._kv.list_keys(NODE_PREFIX)}, False
+            return set(aliases)
+        return None
+
+    def _listed(self) -> set[str]:
+        """The alias of every node record in the namespace."""
+        return {key.removeprefix(NODE_PREFIX) for key in self._kv.list_keys(NODE_PREFIX)}
 
     def _write_index(self, aliases: set[str]) -> None:
         self._kv.put(INDEX_KEY, json.dumps(sorted(aliases), ensure_ascii=False))
