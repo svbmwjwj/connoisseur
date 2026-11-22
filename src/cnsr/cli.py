@@ -36,7 +36,8 @@ cnsr  部署并加固服务器，可选自建 REALITY 节点（SNI 失效时自�
                         最便宜的套餐；配合 --hetzner：机型型号，例如 cx23、cpx22、ccx13；
                         不写时用菜单选（Hetzner 先选方案再选机型）
       --ip <IP>         接管一台已有服务器
-      --to <功能>       部署到哪一层：base 只加固，xray 加固并部署 Xray 节点；
+      --to <功能>       部署到哪一层：base 只加固，docker 加固并安装 Docker，
+                        xray 加固、安装 Docker 并部署 Xray 节点；
                         不写时用菜单勾选
   rm [别名]             删除服务器；AWS 服务器同时删除实例、释放静态 IP；Hetzner 服务器
                         同时删除服务器、Primary IP 和防火墙（SSH key 保留）；不写别名时
@@ -59,7 +60,7 @@ AWS_REGIONS = (
 )  # fmt: skip
 HETZNER_REGIONS = ("sg", "us-oregon", "us-virginia", "de-falkenstein", "de-nuremberg", "fi-helsinki")
 # ``--to``: the feature to deploy up to, with every feature it builds on.
-TO_FEATURES = ("base", "xray")
+TO_FEATURES = ("base", "docker", "xray")
 # The top-level menu of ``cnsr`` run without a command, and the command behind each entry.
 MENU_LABELS = ["部署服务器", "删除服务器", "服务器列表"]
 MENU_COMMANDS = ["up", "rm", "list"]
@@ -86,7 +87,7 @@ def _explain(message: str) -> str:
         first, second = sorted(set(re.findall(r"--[a-z-]+", message)), key=_SOURCE_OPTIONS.index)
         return f"{first} 与 {second} 不能同时使用"
     if "argument --to:" in message:
-        return f"--to 只能是 {' 或 '.join(TO_FEATURES)}"
+        return f"--to 只能是 {'、'.join(TO_FEATURES[:-1])} 或 {TO_FEATURES[-1]}"
     if "argument --size:" in message:
         return "--size 要写规格，例如 2c4g"
     if "argument --hetzner:" in message:

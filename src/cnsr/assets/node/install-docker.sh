@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# install-docker.sh
+# install-docker.sh [package...]
 #
-# Makes sure Docker Engine and the compose plugin are on the node, and jq, which the SNI
-# rotation service needs. When `docker compose version` already works, Docker is not touched
-# and a missing jq is installed from the system's own repositories. Otherwise the script adds
-# Docker's official apt repository for the system (Debian or Ubuntu, by ID and
-# VERSION_CODENAME in /etc/os-release, with the signing key under /etc/apt/keyrings), installs
-# docker-ce, docker-ce-cli, containerd.io and docker-compose-plugin from it (with jq when it is
-# missing), and enables and starts the docker service. Running it again changes nothing that
-# is already in place.
+# Makes sure Docker Engine and the compose plugin are on the node, and the packages named as
+# arguments (the SNI rotation service asks for jq). When `docker compose version` already
+# works, Docker is not touched and the missing packages are installed from the system's own
+# repositories. Otherwise the script adds Docker's official apt repository for the system
+# (Debian or Ubuntu, by ID and VERSION_CODENAME in /etc/os-release, with the signing key under
+# /etc/apt/keyrings), installs docker-ce, docker-ce-cli, containerd.io and
+# docker-compose-plugin from it (with the missing packages), and enables and starts the docker
+# service. Running it again changes nothing that is already in place.
 #
 # The script arrives on stdin of `bash -s`, so no command may read stdin: main runs with
 # stdin on /dev/null. It exits 0 or 1 with a message on stderr, never 255, which the caller
@@ -25,7 +25,6 @@ KEYRING_DIR=/etc/apt/keyrings
 KEYRING=$KEYRING_DIR/docker.asc
 SOURCE_LIST=/etc/apt/sources.list.d/docker.list
 DOCKER_PACKAGES="docker-ce docker-ce-cli containerd.io docker-compose-plugin"
-TOOL_PACKAGES="jq"
 KEY_MARKER="BEGIN PGP PUBLIC KEY BLOCK"
 
 fail() {
@@ -95,12 +94,14 @@ install_repository() {
 }
 
 main() {
-    local tools
-    # $TOOL_PACKAGES is split on purpose: it only holds package names from this script.
-    tools=$(missing_packages $TOOL_PACKAGES)
+    local tools=""
+    if [ "$#" -gt 0 ]; then
+        tools=$(missing_packages "$@")
+    fi
     if docker compose version >/dev/null 2>&1; then
         if [ -n "$tools" ]; then
             apt_get update
+            # $tools is split on purpose: it only holds package names cnsr passed.
             apt_get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install -y $tools
         fi
         return 0
@@ -108,7 +109,7 @@ main() {
     repository
     install_repository
     apt_get update
-    # $DOCKER_PACKAGES and $tools are split on purpose: they only hold package names from this script.
+    # $DOCKER_PACKAGES and $tools are split on purpose: they only hold package names from this script and cnsr.
     apt_get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install -y $DOCKER_PACKAGES $tools
     systemctl enable --quiet --now docker
     docker compose version >/dev/null 2>&1 || fail "Docker 已安装，但 docker compose 仍然不能用。"

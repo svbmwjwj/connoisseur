@@ -1,4 +1,4 @@
-"""``cnsr up --to base|xray``, and the command line ``cnsr up`` prints for a new server."""
+"""``cnsr up --to base|docker|xray``, and the command line ``cnsr up`` prints for a new server."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from cnsr import features
 from cnsr.cli import main, parse_args
 
 HARDEN_ONLY = [features.HARDEN]
+UP_TO_DOCKER = [features.HARDEN, features.DOCKER]
 BOTH = list(features.ALL)
 VPS_ANSWERS = ["", "", "已保存"]  # SSH user and port (the defaults), the console password
 KEPT = "203.0.113.50"
@@ -101,7 +102,7 @@ def test_a_rerun_prints_no_command(fake_deps):
 # --- --to ------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("to, chosen", [("base", HARDEN_ONLY), ("xray", BOTH)])
+@pytest.mark.parametrize("to, chosen", [("base", HARDEN_ONLY), ("docker", UP_TO_DOCKER), ("xray", BOTH)])
 def test_to_deploys_up_to_that_feature_without_the_menu(fake_deps, to, chosen):
     assert run_up(fake_deps, aws="jp-tokyo", features=None, to=to) == 0  # no answer queued
     assert "要部署哪些功能？" not in fake_deps.terminal.text
@@ -121,7 +122,7 @@ def test_to_xray_adds_xray_to_a_hardened_server(fake_deps):
     assert fake_deps.node().features == BOTH
 
 
-@pytest.mark.parametrize("to", ["base", "xray"])
+@pytest.mark.parametrize("to", ["base", "docker", "xray"])
 def test_the_command_line_takes_to(to):
     assert parse_args(["up", "x", "--aws", "sg", "--to", to]).to == to
 
@@ -139,7 +140,7 @@ def test_without_to_the_menu_decides():
 def test_a_wrong_to_is_reported_in_chinese(argv, capsys):
     assert main(argv) == 2
     err = capsys.readouterr().err
-    assert err.startswith("错误：") and "--to 只能是 base 或 xray" in err
+    assert err.startswith("错误：") and "--to 只能是 base、docker 或 xray" in err
 
 
 def test_the_command_line_and_up_know_the_same_values():

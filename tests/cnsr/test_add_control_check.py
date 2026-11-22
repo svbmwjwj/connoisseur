@@ -33,7 +33,7 @@ def test_a_cloudflare_challenge_stops_the_add_at_once(fake_deps):
     assert run_up(fake_deps, aws="jp-tokyo") == 1
     screen = fake_deps.terminal.screen
     assert fake_deps.server.control_checks == 1
-    assert "[8/8] 启动换 SNI 服务：失败" in screen
+    assert "[9/9] 启动换 SNI 服务：失败" in screen
     assert f"节点连控制端 {NODE_HOST} 被 Cloudflare 拦下了（HTTP 403）" in screen
     assert "重跑同一条命令" in screen
 

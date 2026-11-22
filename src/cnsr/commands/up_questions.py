@@ -30,7 +30,7 @@ SOURCE_LABELS = ["已有服务器（输入 IP）", "在 AWS Lightsail 新开一�
 # What each cloud is called when a rerun's arguments do not match its record.
 VENDORS = {"aws": "AWS", "hetzner": "Hetzner"}
 # What ``--to`` names each feature: the feature to deploy up to, with every one before it.
-TO_FEATURES = {"base": features.HARDEN, "xray": features.XRAY}
+TO_FEATURES = {"base": features.HARDEN, "docker": features.DOCKER, "xray": features.XRAY}
 
 
 def answers(ns: Namespace, deps: Deps, inventory: Inventory) -> SimpleNamespace:
@@ -105,7 +105,7 @@ def _features(ns: Namespace, deps: Deps, installed: list[str]) -> list[str]:
             checked=set(range(len(names))),
             locked={names.index(name) for name in installed},
             validate=lambda picked: features.problem([names[index] for index in picked]),
-            requires={names.index(name): {names.index(features.BASE)} for name in features.EXTENSIONS},
+            requires={names.index(name): {names.index(need) for need in features.below(name)} for name in features.EXTENSIONS},
         )
         chosen = [names[index] for index in ticks]
     problem = features.problem(chosen)

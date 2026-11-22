@@ -85,6 +85,7 @@ class FakeServer:
         self.reality_fails: set[str] = set()  # domains a REALITY server cannot borrow (reality-candidates.sh)
         self.ufw_allowed: set[str] = set()  # rules `ufw allow` added, such as "443/tcp"
         self.script_args: dict[str, list[str]] = {}  # the last arguments each script ran with
+        self.script_calls: dict[str, list[list[str]]] = {}  # the arguments of each run of each script
         self.generated: list[str] = []  # private keys made by `xray x25519`
         self.verified: list[tuple[list[str], str, str]] = []  # verify-reality.sh: args, values file, its mode
         self.client_ip: Callable[[], str | None] = lambda: "203.0.113.5"  # SSH_CLIENT's address; None: unset
@@ -130,6 +131,7 @@ class FakeServer:
 
     def script(self, name: str, args: list[str]) -> str:
         self.script_args[name] = args
+        self.script_calls.setdefault(name, []).append(args)
         if name == "preflight.sh":
             return self.preflight
         if name == "baseline-check.sh":

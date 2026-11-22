@@ -35,8 +35,8 @@ def test_a_deployment_shows_stages_not_details(fake_deps):
     assert run_up(fake_deps, aws="jp-tokyo") == 0
     screen = fake_deps.terminal.screen
     assert "cnsr up jp-1 · AWS 日本东京" in screen
-    assert "[1/8] 确定服务器地址" in screen and "[7/8] 登记节点并切换 SSH 别名：完成" in screen
-    assert "安装 Docker" not in screen and "节点验证了" not in screen
+    assert "[1/9] 确定服务器地址" in screen and "[8/9] 登记节点并切换 SSH 别名：完成" in screen
+    assert "已装好就跳过" not in screen and "节点验证了" not in screen
     assert "节点验证了" in fake_deps.terminal.log
 
 
@@ -126,7 +126,7 @@ def test_cleanup_is_one_busy_line_and_the_result(fake_deps):
     fake_deps.server.preflight = REFUSED
     assert run_up(fake_deps, aws="jp-tokyo") == 1
     lines = fake_deps.terminal.out.getvalue().splitlines()
-    failed = next(i for i, line in enumerate(lines) if line.startswith("[2/8] 连接服务器并建解析：失败"))
+    failed = next(i for i, line in enumerate(lines) if line.startswith("[2/9] 连接服务器并建解析：失败"))
     assert lines[failed + 1 :] == [CLEANUP_START, CLEANED]
     assert CLEANUP_START.removesuffix("……") in fake_deps.terminal.log
     assert "删除 AWS 上的静态 IP 和实例" in fake_deps.terminal.log

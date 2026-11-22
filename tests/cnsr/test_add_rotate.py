@@ -63,7 +63,7 @@ def test_add_installs_and_starts_the_rotate_service(fake_deps, monkeypatch):
     # the service starts only once the node is in KV with its line and token
     (node,) = registered
     assert node.line and node.node_token
-    assert "[8/8] 启动换 SNI 服务：完成" in fake_deps.terminal.screen
+    assert "[9/9] 启动换 SNI 服务：完成" in fake_deps.terminal.screen
 
 
 def test_every_add_clears_the_stop_markers(fake_deps):
@@ -152,7 +152,7 @@ def test_a_service_that_does_not_come_up_stops_the_add(fake_deps):
     fake_deps.server.service_fails = True
     assert run_up(fake_deps, aws="jp-tokyo") == 1
     screen = fake_deps.terminal.screen
-    assert "[8/8] 启动换 SNI 服务：失败" in screen
+    assert "[9/9] 启动换 SNI 服务：失败" in screen
     assert "换 SNI 服务没有在节点上运行起来（状态：activating）" in screen and "journalctl -u cnsr-rotate" in screen
     assert 3 in fake_deps.sleeps  # it had a moment to fail before the check
 
@@ -201,7 +201,7 @@ def test_a_rerun_stops_the_service_before_it_touches_the_node(fake_deps):
     start = len(server.log)
     assert run_up(fake_deps, aws="jp-tokyo") == 0
     rerun = since(fake_deps, start)
-    touches = [i for i, what in enumerate(rerun) if what in ("validate-candidates.sh", "install-docker.sh", "verify-reality.sh")
+    touches = [i for i, what in enumerate(rerun) if what in ("validate-candidates.sh", "verify-reality.sh")
                or what.startswith(("put /opt/cnsr/backups.json", "put /opt/cnsr/xray", "put /opt/cnsr/identity.env"))]
     assert touches and rerun.index(STOP) < min(touches)
     assert rerun.index(STOP) < rerun.index(ENABLE) and server.service == "active"

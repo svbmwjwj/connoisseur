@@ -1,4 +1,4 @@
-"""Pipeline steps 4-5: scan the node's neighbourhood from this computer, then let the node choose."""
+"""Pipeline steps 5-6: scan the node's neighbourhood from this computer, then let the node choose."""
 
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ def step_sni(ctx: DeployContext) -> None:
     """Have the node check the candidates itself, then keep the SNI and write the backups.
 
     The node first checks each candidate with curl, then tries the ones that pass with a real
-    REALITY handshake (``reality-candidates.sh``, which needs Docker). A node that already runs
+    REALITY handshake (``reality-candidates.sh``, which needs the Docker of step 4). A node that already runs
     Xray keeps its current SNI; only its backups are replaced. A node whose deployment never
     finished keeps its SNI only while it still passes, and otherwise gets a new one. New
     backups end the control plane's "backups used up" mark for the node. An installed SNI
@@ -164,8 +164,7 @@ def _route_text(seen: Egress, network: str) -> str:
 def _borrowable(ctx: DeployContext, cands: list[Candidate]) -> list[Candidate]:
     """The candidates a REALITY server on the node really completes a handshake with, in order."""
     remote = ctx.remote()
-    ctx.deps.ui.detail("安装 Docker（已装好就跳过），再用 Xray 实际试一遍每个候选的 REALITY 握手。")
-    remote.run_script("install-docker.sh", [])
+    ctx.deps.ui.detail("用 Xray 实际试一遍每个候选的 REALITY 握手。")
     output = remote.run_script("reality-candidates.sh", [value for cand in cands for value in (cand.domain, cand.ip)])
     ok = {(fields[0], fields[1]) for fields in map(str.split, output.splitlines()) if len(fields) == 2}
     return [cand for cand in cands if (cand.domain, cand.ip) in ok]

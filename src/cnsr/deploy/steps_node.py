@@ -1,4 +1,4 @@
-"""Pipeline steps 6-7: Xray on the node, then registering the node and moving its SSH alias."""
+"""Pipeline steps 7-8: Xray on the node, then registering the node and moving its SSH alias."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ PUBLIC_DNS_WAIT = 120
 
 
 def step_xray(ctx: DeployContext) -> None:
-    """Install Docker, run Xray with the node's identity, and prove it works from both sides.
+    """Run Xray with the node's identity in the Docker of step 4, and prove it works from both sides.
 
     An existing config keeps its UUID, keys, shortId and SNI; the files are rewritten from the
     current templates. A running Xray is restarted when its config changed, or when an earlier
@@ -65,8 +65,6 @@ def step_xray(ctx: DeployContext) -> None:
     node, ui = ctx.node, ctx.deps.ui
     remote = ctx.remote()
     restart = ctx.exists(RESTART_MARKER)
-    ui.detail("安装 Docker（已装好就跳过）。")
-    remote.run_script("install-docker.sh", [])
     current = ctx.read(CONFIG_PATH)
     info, private_key = _identity(ctx, remote, current)
     remote.run(["install", "-d", "-m", "755", XRAY_DIR, CONF_DIR], sudo=True)

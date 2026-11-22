@@ -18,8 +18,8 @@ from cnsr.state import ControlMeta
 
 # user (default root), port (default 22), then "已保存" once the console password is shown
 VPS_ANSWERS = ["", "", "已保存"]
-STEP_NAMES = ["step_ip", "step_connect", "step_harden", "step_scan", "step_sni", "step_xray", "step_register",
-              "step_rotate"]
+STEP_NAMES = ["step_ip", "step_connect", "step_harden", "step_docker", "step_scan", "step_sni", "step_xray",
+              "step_register", "step_rotate"]
 
 
 def test_noninteractive_missing_alias_fails(fake_deps):
@@ -64,9 +64,9 @@ def test_pipeline_runs_steps_in_order(fake_deps, monkeypatch):
     assert run_up(fake_deps, aws="jp-tokyo") == 0
     assert order == STEP_NAMES
     headers = re.findall(r"^\[(\d)/(\d)\] [^：]*$", fake_deps.terminal.screen, flags=re.M)
-    assert headers == [(str(i), "8") for i in range(1, 9)]
+    assert headers == [(str(i), "9") for i in range(1, 10)]
     what = fake_deps.server.what()
-    milestones = ["preflight.sh", "baseline-check.sh", "validate-candidates.sh", "install-docker.sh",
+    milestones = ["preflight.sh", "baseline-check.sh", "install-docker.sh", "validate-candidates.sh",
                   "verify-reality.sh", "put /opt/cnsr/node.env"]
     assert [what.index(m) for m in milestones] == sorted(what.index(m) for m in milestones)
 

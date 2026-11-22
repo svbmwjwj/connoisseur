@@ -61,5 +61,5 @@ def test_a_full_run_log_holds_no_secret(fake_deps, tmp_path):
     leaked = [name for name, value in sensitive.items() if value in log]
     assert leaked == []
     assert "***" in log
-    assert "[4/8] 扫描候选 SNI" in log
+    assert "[5/9] 扫描候选 SNI" in log
     assert any("docker" in line for line in log.splitlines())

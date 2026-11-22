@@ -31,16 +31,23 @@ def fresh(box, os_id: str = "debian", codename: str = "trixie") -> None:
     box.answer(f"curl -fsSL --retry 3 --max-time 60 https://download.docker.com/linux/{os_id}/gpg", KEY + "\n")
 
 
+def test_without_packages_only_docker_is_checked(box):
+    result = box.run(SCRIPT)
+    assert result.status == 0 and result.stdout == ""
+    assert result.calls == [COMPOSE]
+    assert not box.path("/etc/apt").exists()
+
+
 def test_skips_everything_when_compose_and_jq_are_there(box):
     box.answer(JQ, "install ok installed")
-    result = box.run(SCRIPT)
+    result = box.run(SCRIPT, "jq")
     assert result.status == 0 and result.stdout == ""
     assert result.calls == [JQ, COMPOSE]
     assert not box.path("/etc/apt").exists()
 
 
 def test_installs_only_jq_when_docker_is_there(box):
-    result = box.run(SCRIPT)
+    result = box.run(SCRIPT, "jq")
     assert result.status == 0, result.stderr
     assert result.calls == [JQ, COMPOSE, f"{APT} update", f"{APT} {CONF} install -y jq"]
     assert not box.path("/etc/apt/sources.list.d").exists()
@@ -48,7 +55,7 @@ def test_installs_only_jq_when_docker_is_there(box):
 
 def test_a_jq_that_cannot_be_installed_fails(box):
     box.answer(f"{APT} {CONF} install -y jq", status=100)
-    assert box.run(SCRIPT).status == 100
+    assert box.run(SCRIPT, "jq").status == 100
 
 
 def test_installs_from_the_official_repository(box):
@@ -56,7 +63,6 @@ def test_installs_from_the_official_repository(box):
     result = box.run(SCRIPT)
     assert result.status == 0, result.stderr
     assert result.calls == [
-        JQ,
         COMPOSE,
         "dpkg --print-architecture",
         "dpkg-query -W -f=${Status} ca-certificates",
@@ -65,7 +71,7 @@ def test_installs_from_the_official_repository(box):
         f"{APT} {CONF} install -y ca-certificates curl",
         "curl -fsSL --retry 3 --max-time 60 https://download.docker.com/linux/debian/gpg",
         f"{APT} update",
-        f"{APT} {CONF} install -y {PACKAGES} jq",
+        f"{APT} {CONF} install -y {PACKAGES}",
         "systemctl enable --quiet --now docker",
         COMPOSE,
     ]
@@ -74,6 +80,14 @@ def test_installs_from_the_official_repository(box):
     assert box.read(SOURCES) == line.format(root=box.root, keyring=KEYRING) and box.mode(SOURCES) == 0o644
     assert box.mode("/etc/apt/keyrings") == 0o755
     assert box.leftovers() == [] and not result.stdin_leaked
+
+
+def test_packages_asked_for_are_installed_with_docker(box):
+    fresh(box)
+    result = box.run(SCRIPT, "jq")
+    assert result.status == 0, result.stderr
+    assert result.calls[0] == JQ
+    assert f"{APT} {CONF} install -y {PACKAGES} jq" in result.calls
 
 
 def test_ubuntu_uses_the_ubuntu_repository_and_its_codename(box):
@@ -114,7 +128,7 @@ def test_refuses_a_system_that_is_not_debian_or_ubuntu(box, os_id):
     fresh(box, os_id)
     result = box.run(SCRIPT)
     assert result.status == 1 and "不支持的系统" in result.stderr
-    assert result.calls == [JQ, COMPOSE]
+    assert result.calls == [COMPOSE]
     assert not box.path("/etc/apt").exists()
 
 
@@ -150,7 +164,7 @@ def test_stops_when_the_download_is_not_a_pgp_key(box):
 
 def test_stops_when_apt_fails(box):
     fresh(box)
-    box.answer(f"{APT} {CONF} install -y {PACKAGES} jq", status=100)
+    box.answer(f"{APT} {CONF} install -y {PACKAGES}", status=100)
     result = box.run(SCRIPT)
     assert result.status == 100
     assert "systemctl enable --quiet --now docker" not in result.calls

@@ -151,7 +151,7 @@ def test_no_candidates_stop(fake_deps):
     fake_deps.hits = []
     assert run_up(fake_deps, aws="jp-tokyo") == 1
     assert "没有找到" in fake_deps.terminal.text
-    assert not fake_deps.server.did("validate-candidates.sh") and not fake_deps.server.did("install-docker.sh")
+    assert not fake_deps.server.did("validate-candidates.sh") and not fake_deps.server.did("reality-candidates.sh")
 
 
 def test_new_node_takes_fastest_candidate_and_keeps_every_other_one(fake_deps):
@@ -171,7 +171,7 @@ def test_candidates_a_reality_server_cannot_borrow_are_dropped(fake_deps):
     assert "site0.example.com" not in backups and "site2.example.com" not in backups
     # The check runs the pinned Xray image, so Docker comes first.
     what = fake_deps.server.what()
-    assert what.index("validate-candidates.sh") < what.index("install-docker.sh") < what.index("reality-candidates.sh")
+    assert what.index("install-docker.sh") < what.index("validate-candidates.sh") < what.index("reality-candidates.sh")
 
 
 def test_no_candidate_passing_the_reality_check_stops(fake_deps):
@@ -315,7 +315,7 @@ def test_failed_step_keeps_partial_node(fake_deps, error):
         assert "握手验证失败" in fake_deps.terminal.text
     # The stage display is closed on every path, with the way it ended.
     word = "已中断" if isinstance(error, KeyboardInterrupt) else "失败"
-    assert re.search(rf"^\[\d/8\] .*：{word}（\d+:\d\d）$", fake_deps.terminal.text, flags=re.M)
+    assert re.search(rf"^\[\d/9\] .*：{word}（\d+:\d\d）$", fake_deps.terminal.text, flags=re.M)
     node = fake_deps.node()
     assert node.domain and set(node.dns_record_ids) == {"A", "AAAA"}
     assert node.xray is not None and node.line is None

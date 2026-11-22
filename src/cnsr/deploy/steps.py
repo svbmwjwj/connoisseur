@@ -1,7 +1,8 @@
-"""The ``cnsr up`` pipeline: eight steps, each of which looks at the real state before acting.
+"""The ``cnsr up`` pipeline: nine steps, each of which looks at the real state before acting.
 
-Steps 1-3 prepare and harden the server; steps 4-8 deploy the Xray node and run only when
-that feature is chosen (see ``steps_for``).
+Steps 1-3 prepare and harden the server; step 4 installs Docker and runs only when Docker is
+chosen; steps 5-9 deploy the Xray node and run only when that feature is chosen (see
+``steps_for``).
 
 A run that stops part way (an error, Ctrl-C) is continued by running the same command again.
 So a step cut off by a dropped connection runs once more, once the server answers again.
@@ -13,6 +14,7 @@ from cnsr.aws.lightsail import REGION_NAMES
 from cnsr.cloudflare.api import CloudflareError
 from cnsr import features
 from cnsr.deploy.context import AddRequest, DeployContext
+from cnsr.deploy.steps_docker import step_docker
 from cnsr.deploy.steps_host import step_connect, step_harden, step_ip
 from cnsr.deploy.steps_node import step_register, step_xray
 from cnsr.deploy.steps_rotate import resume_rotation, step_rotate
@@ -22,12 +24,14 @@ from cnsr.ssh.remote import SshError
 from cnsr.waiting import Deadline
 
 HOST_STEPS = (step_ip, step_connect, step_harden)
+DOCKER_STEPS = (step_docker,)
 XRAY_STEPS = (step_scan, step_sni, step_xray, step_register, step_rotate)
-STEPS = HOST_STEPS + XRAY_STEPS
+STEPS = HOST_STEPS + DOCKER_STEPS + XRAY_STEPS
 TITLES = {
     "step_ip": "确定服务器地址",
     "step_connect": "连接服务器并建解析",
     "step_harden": "加固",
+    "step_docker": "安装 Docker",
     "step_scan": "扫描候选 SNI",
     "step_sni": "在节点上验证并选定 SNI",
     "step_xray": "部署 Xray",
@@ -57,7 +61,9 @@ def heading(req: AddRequest) -> str:
 
 def steps_for(chosen: list[str]) -> tuple:
     """The steps that deploy ``chosen``: the server's own, then those of each extension."""
-    return STEPS if features.XRAY in chosen else STEPS[: len(HOST_STEPS)]
+    layers = {features.HARDEN: HOST_STEPS, features.DOCKER: DOCKER_STEPS, features.XRAY: XRAY_STEPS}
+    names = {step.__name__ for feature in (features.HARDEN, *chosen) for step in layers[feature]}
+    return tuple(step for step in STEPS if step.__name__ in names)  # by name: tests wrap the steps
 
 
 def run_pipeline(ctx: DeployContext) -> None:

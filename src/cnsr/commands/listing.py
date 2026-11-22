@@ -24,7 +24,7 @@ from cnsr.state import ControlMeta, Inventory, Node
 
 SOURCES = {"aws": "AWS", "hetzner": "Hetzner", "vps": "自有服务器"}
 HEADER = ("别名", "功能", "来源", "域名", "IPv4", "SNI", "流量", "")
-MARKS = {features.XRAY: ("● ", "green"), features.HARDEN: ("○ ", "yellow")}  # by the last feature installed
+MARKS = {features.XRAY: ("● ", "green"), features.DOCKER: ("◐ ", "cyan"), features.HARDEN: ("○ ", "yellow")}  # by the last feature installed
 COLUMN_STYLES = ("bold", "", "", "dim", "", "cyan", "", "red")  # alias, domain, SNI and the missing-subscription note
 LABEL = "v2rayN 订阅  "  # the widest subscription label and its gap
 # How the traffic column reaches each cloud: the client for a region, None without credentials.

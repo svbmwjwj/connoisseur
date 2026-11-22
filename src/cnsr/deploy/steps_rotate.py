@@ -1,10 +1,10 @@
-"""Pipeline step 8: the node's SNI rotation service (cnsr-rotate.sh under systemd).
+"""Pipeline step 9: the node's SNI rotation service (cnsr-rotate.sh under systemd).
 
 It runs last, once the node is registered with its line and token: the service asks the
 control plane for work as soon as it starts, and stops for good when its token is refused.
 
 An installed service is stopped before a run of cnsr up changes the node (``stop_rotation``, called first
-in step 5), so it cannot rotate while cnsr rewrites backups.json and config.json or runs
+in step 6), so it cannot rotate while cnsr rewrites backups.json and config.json or runs
 verify-reality.sh. Its TERM handler only undoes a switch it had not finished; one that even
 that could not undo is settled here before the service starts again (``_settle_switch``).
 line-pending.json is left alone: it holds the line config.json already runs, which the service
@@ -130,6 +130,7 @@ def step_rotate(ctx: DeployContext) -> None:
     """
     ui = ctx.deps.ui
     remote = ctx.remote()
+    remote.run_script("install-docker.sh", ["jq"])  # Docker is there already: this only adds jq
     wanted = {f"{BIN_DIR}/{name}": (_read_asset(name), "755") for name in SCRIPTS}
     wanted[UNIT_PATH] = (_read_asset(SERVICE), "644")
     restart = ctx.exists(RESTART_MARKER)
