@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { makeHandler } from "../../src/cnsr/assets/worker/handler.js";
 import { v2raynLink } from "../../src/cnsr/assets/worker/v2rayn.js";
 
@@ -25,6 +26,13 @@ test("a Quantumult X line becomes a VLESS REALITY share link", () => {
     headerType: "none",
   });
   assert.equal(link.hash, "#jp-1");
+});
+
+// The same cases as tests/cnsr/test_qx.py: `cnsr list <alias>` makes its link in Python.
+const SHARED = JSON.parse(readFileSync(new URL("../shared/share-links.json", import.meta.url), "utf8"));
+
+test("the links match the ones cnsr list prints", () => {
+  for (const { line, link } of SHARED) assert.equal(v2raynLink(line), link, line);
 });
 
 test("a line missing a REALITY field gives no link", () => {

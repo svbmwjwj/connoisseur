@@ -76,13 +76,14 @@ def stop_rotation(ctx: DeployContext) -> None:
     """Stop the service when it is installed; ``step_rotate`` starts it again."""
     if not ctx.exists(UNIT_PATH):
         return
-    ctx.deps.ui.detail("先停下换 SNI 服务，部署完成后再启动。")
+    ctx.deps.ui.detail("先停下换 SNI 服务，改完后再启动。")
     ctx.rotation_stopped = True  # first: an interrupt right after the stop must still restart it
     ctx.remote().run(["systemctl", "stop", SERVICE], sudo=True)
 
 
-def resume_rotation(ctx: DeployContext) -> None:
-    """Start the service again after a run that stopped it and then failed or was interrupted.
+def resume_rotation(ctx: DeployContext, note: str = "部署没有完成，换 SNI 服务已重新启动。") -> None:
+    """Start the service again after a run that stopped it and then failed or was interrupted, or
+    after a change other than a deployment; ``note`` goes to the log.
 
     Best effort: the run's own error is the one to report, so a start that fails only warns.
     """
@@ -100,7 +101,7 @@ def resume_rotation(ctx: DeployContext) -> None:
             raise
         return
     ctx.rotation_stopped = False
-    ctx.deps.ui.detail("部署没有完成，换 SNI 服务已重新启动。")
+    ctx.deps.ui.detail(note)
 
 
 def _settle_switch(ctx: DeployContext) -> None:

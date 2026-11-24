@@ -6,6 +6,7 @@ import secrets
 
 from cnsr import runlog
 from cnsr.cloudflare.control import ControlPlaneBlocked, ProbeResult
+from cnsr.deploy.apply_config import CONF_DIR, PULL_TIMEOUT, RESTART_MARKER, XRAY_DIR, apply_config, put_verify_env, stage_config
 from cnsr.deploy.context import DeployContext
 from cnsr.deploy.dns_records import drop_aaaa, publish_aaaa, switch_alias_when_ready
 from cnsr.deploy.steps_rotate import put_service_input
@@ -16,7 +17,6 @@ from cnsr.server.xray import (
     COMPOSE_PATH,
     CONFIG_PATH,
     IDENTITY_ENV_PATH,
-    NODE_DIR,
     NODE_ENV_PATH,
     VERIFY_ENV_PATH,
     XRAY_IMAGE,
@@ -28,25 +28,15 @@ from cnsr.server.xray import (
     parse_x25519,
     read_identity,
     render_config,
-    verify_env,
 )
 from cnsr.ssh.config import read_block
 from cnsr.waiting import Deadline
-from cnsr.ssh.remote import Remote, SshError
+from cnsr.ssh.remote import Remote
 from cnsr.state import XrayInfo
 
-XRAY_DIR = f"{NODE_DIR}/xray"
-CONF_DIR = f"{XRAY_DIR}/conf"
-# Exists from just before a changed config moves into place until Xray has been restarted.
-RESTART_MARKER = f"{XRAY_DIR}/.restart-pending"
-CONTAINER_CONF_DIR = "/usr/local/etc/xray"  # where compose.yml mounts CONF_DIR
-# Xray tells a config file's format by its extension, so the staged copy must end in .json.
-STAGED_NAME = "config.new.json"
 X25519 = ["docker", "run", "--rm", XRAY_IMAGE, "x25519"]
 COMPOSE = ["docker", "compose", "-f", COMPOSE_PATH]
 RETRY_SECONDS = 10
-# The first `up`, the key generation and the config test of a new image pull the Xray image.
-PULL_TIMEOUT = 300
 # A control plane deployed minutes ago may still be waiting for its certificate.
 V4_PROBE_WAIT = 120
 V6_PROBE_WAIT = 30
@@ -57,18 +47,21 @@ def step_xray(ctx: DeployContext) -> None:
     """Run Xray with the node's identity in the Docker of step 4, and prove it works from both sides.
 
     An existing config keeps its UUID, keys, shortId and SNI; the files are rewritten from the
-    current templates. A running Xray is restarted when its config changed, or when an earlier
-    run changed it but stopped before the restart (``RESTART_MARKER``). The identity the SNI
-    rotation service checks its handshakes with goes in ``IDENTITY_ENV_PATH``, without the
-    private key.
+    current templates. When one of them changed, or an earlier run changed the config but stopped
+    before the restart (``RESTART_MARKER``), the node takes them up by itself (``apply_config``):
+    Xray may be what carries this connection. The identity the SNI rotation service checks its
+    handshakes with goes in ``IDENTITY_ENV_PATH``, without the private key.
     """
     node, ui = ctx.node, ctx.deps.ui
     remote = ctx.remote()
-    restart = ctx.exists(RESTART_MARKER)
     current = ctx.read(CONFIG_PATH)
     info, private_key = _identity(ctx, remote, current)
     remote.run(["install", "-d", "-m", "755", XRAY_DIR, CONF_DIR], sudo=True)
-    remote.put_text(COMPOSE_PATH, compose_text(), "644")
+    compose = compose_text()
+    stale = current is not None and (ctx.exists(RESTART_MARKER) or ctx.read(COMPOSE_PATH) != compose)
+    if stale:  # a new compose.yml in place must not be forgotten when this run stops here
+        remote.run(["touch", RESTART_MARKER], sudo=True)
+    remote.put_text(COMPOSE_PATH, compose, "644")
     config = render_config(
         config_template(),
         alias=node.alias,
@@ -77,21 +70,20 @@ def step_xray(ctx: DeployContext) -> None:
         short_id=info.short_id,
         sni=info.sni,
         dest_ip=info.dest_ip,
+        users=node.users,
     )
-    if config != current:
-        # A running Xray keeps the old config until it restarts.
-        _install_config(remote, config, restart_owed=current is not None)
-        restart = restart or current is not None
     node.xray = info
     put_service_input(ctx, IDENTITY_ENV_PATH, identity_env(node.alias, info.uuid, info.public_key, info.short_id))
-    remote.run([*COMPOSE, "up", "-d"], sudo=True, timeout=PULL_TIMEOUT)
-    if restart:
-        remote.run([*COMPOSE, "restart"], sudo=True)
-        remote.run(["rm", "-f", RESTART_MARKER], sudo=True)
-    ui.detail("在节点本机验证 REALITY 握手。")
-    # The values go in a root-only file, never on the command line, where sudo would log them.
-    remote.put_text(VERIFY_ENV_PATH, verify_env(info.uuid, info.public_key, info.short_id, info.sni), "600")
-    remote.run_script("verify-reality.sh", [VERIFY_ENV_PATH])
+    if current is not None and (stale or config != current):
+        ui.detail("Xray 的文件有变化，由节点自己重启 Xray 并验证 REALITY 握手，失败就恢复旧配置。")
+        apply_config(ctx, config, info, keep_stopped=True)
+    else:
+        if current is None:
+            remote.run(["mv", "-f", stage_config(remote, config), CONFIG_PATH], sudo=True)
+        remote.run([*COMPOSE, "up", "-d"], sudo=True, timeout=PULL_TIMEOUT)
+        ui.detail("在节点本机验证 REALITY 握手。")
+        put_verify_env(remote, info)
+        remote.run_script("verify-reality.sh", [VERIFY_ENV_PATH])
     _check_from_outside(ctx)
 
 
@@ -143,27 +135,6 @@ def _identity(ctx: DeployContext, remote: Remote, current: str | None) -> tuple[
     runlog.secret(private_key)
     uuid, short_id = new_identity(ctx.deps.rng)
     return XrayInfo(uuid, public_key, short_id, ctx.sni.domain, ctx.sni.ip), private_key
-
-
-def _install_config(remote: Remote, config: str, *, restart_owed: bool) -> None:
-    """Put ``config`` in place only after ``xray run -test`` accepts it.
-
-    With ``restart_owed`` the restart marker is created first, so that a run interrupted after
-    the move still restarts Xray next time.
-    """
-    staged = f"{CONF_DIR}/{STAGED_NAME}"
-    remote.put_text(staged, config, "644")
-    mount = f"{CONF_DIR}:{CONTAINER_CONF_DIR}:ro"
-    test = ["docker", "run", "--rm", "-v", mount, XRAY_IMAGE, "run", "-test", "-c", f"{CONTAINER_CONF_DIR}/{STAGED_NAME}"]
-    try:
-        remote.run(test, sudo=True, timeout=PULL_TIMEOUT)  # a new XRAY_IMAGE is pulled here
-    except SshError:
-        raise
-    except CnsrError as exc:
-        raise CnsrError(f"新的 Xray 配置没有通过 xray -test，节点上的配置保持不变：{exc}") from exc
-    if restart_owed:
-        remote.run(["touch", RESTART_MARKER], sudo=True)
-    remote.run(["mv", "-f", staged, CONFIG_PATH], sudo=True)
 
 
 def _check_from_outside(ctx: DeployContext) -> None:

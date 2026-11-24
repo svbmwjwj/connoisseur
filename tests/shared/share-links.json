@@ -1,0 +1,12 @@
+[
+  {
+    "line": "vless=n1.example.com:443, method=none, password=11111111-1111-4111-8111-111111111111, obfs=over-tls, obfs-host=sni.example.org, reality-base64-pubkey=Ab-c_D, reality-hex-shortid=0123abcd, vless-flow=xtls-rprx-vision, udp-relay=true, tag=jp-1",
+    "link": "vless://11111111-1111-4111-8111-111111111111@n1.example.com:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=sni.example.org&fp=chrome&pbk=Ab-c_D&sid=0123abcd&type=tcp&headerType=none#jp-1"
+  },
+  {
+    "line": "vless=n2.example.com:443, password=u, obfs-host=s.example.org, reality-base64-pubkey=K, reality-hex-shortid=01, tag=jp_2 家",
+    "link": "vless://u@n2.example.com:443?encryption=none&security=reality&sni=s.example.org&fp=chrome&pbk=K&sid=01&type=tcp&headerType=none#jp_2%20%E5%AE%B6"
+  },
+  { "line": "vless=n3.example.com:443, password=u, obfs-host=s.example.org, reality-base64-pubkey=K, tag=x", "link": null },
+  { "line": "trojan=n4.example.com:443, password=u, tag=x", "link": null }
+]

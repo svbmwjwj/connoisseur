@@ -12,16 +12,17 @@ from rich.console import Console
 
 from deploy_fakes import run_up
 
+from cnsr import runlog
 from cnsr.commands import listing
 from cnsr.progress import LiveStages
-from cnsr.qx import check_url, snippet_url, v2rayn_url
-from cnsr.state import ControlMeta
+from cnsr.qx import check_url, share_link, snippet_url, user_line, v2rayn_url
+from cnsr.state import ControlMeta, XrayUser
 from cnsr.ui import Ui
 
 
-def run_list(fakes) -> tuple[int, str]:
+def run_list(fakes, alias: str | None = None, menu: bool = False) -> tuple[int, str]:
     fakes.terminal.clear()
-    code = listing.run(argparse.Namespace(command="list", alias=None), fakes.deps)
+    code = listing.run(argparse.Namespace(command="list", alias=alias, menu=menu), fakes.deps)
     return code, fakes.terminal.text
 
 
@@ -104,7 +105,7 @@ def test_list_in_a_terminal_colours_the_table_and_never_breaks_an_address(fake_d
     screen = io.StringIO()
     console = Console(file=screen, force_terminal=True, width=60, color_system="standard")
     fake_deps.deps.ui = Ui(out=screen, interactive=False, display=LiveStages(console, auto_refresh=False))
-    assert listing.run(argparse.Namespace(command="list", alias=None), fake_deps.deps) == 0
+    assert listing.run(argparse.Namespace(command="list", alias=None, menu=False), fake_deps.deps) == 0
     out = screen.getvalue()
     assert "\x1b[32m● Xray 节点" in out  # green
     plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
@@ -138,3 +139,125 @@ def test_aws_traffic_that_cannot_be_read_is_a_dash(fake_deps):
     _, out = run_list(fake_deps)
     row = next(line for line in out.splitlines() if line.strip().startswith("jp-1 "))
     assert " - " in row or row.rstrip().endswith("-")
+
+
+# ---- one node, to add by hand -------------------------------------------------------------
+
+
+def test_list_with_an_alias_shows_how_to_add_that_node_alone(fake_deps):
+    assert run_up(fake_deps, aws="jp-tokyo") == 0
+    meta = ControlMeta.from_json(fake_deps.kv()["meta:control"])
+    node = fake_deps.node()
+    before = len(fake_deps.cloudflare.calls())
+
+    code, out = run_list(fake_deps, "jp-1")
+
+    assert code == 0
+    assert node.line in out and "[server_local]" in out
+    assert share_link(node.line) in out
+    assert meta.client_token not in out and meta.host not in out  # nothing of the subscription
+    assert "换 SNI 后要重新发" in out
+    assert {method for method, _ in fake_deps.cloudflare.calls()[before:]} == {"GET"}
+
+
+def test_list_with_an_unknown_alias_says_so(fake_deps):
+    assert run_up(fake_deps, aws="jp-tokyo") == 0
+    code, out = run_list(fake_deps, "jp-9")
+    assert code == 1 and "没有名为 jp-9 的服务器" in out
+
+
+def test_list_with_an_alias_that_has_no_xray_node_says_why(fake_deps):
+    assert run_up(fake_deps, aws="jp-tokyo", features=["harden"]) == 0
+    code, out = run_list(fake_deps, "jp-1")
+    assert code == 1 and "jp-1 没有可以分享的 Xray 节点" in out and "vless" not in out
+
+
+def test_list_with_an_alias_whose_line_is_missing_says_how_to_get_it(fake_deps):
+    assert run_up(fake_deps, aws="jp-tokyo") == 0
+    node = fake_deps.node()
+    node.line = None
+    fake_deps.store(node)
+    code, out = run_list(fake_deps, "jp-1")
+    assert code == 1 and "cnsr up jp-1" in out and "vless" not in out
+
+
+def test_list_with_an_alias_shows_each_user_apart_from_the_owner(fake_deps):
+    assert run_up(fake_deps, aws="jp-tokyo") == 0
+    node = fake_deps.node()
+    node.users = [XrayUser("alice", "22222222-2222-4222-8222-222222222222")]
+    fake_deps.store(node)
+    code, out = run_list(fake_deps, "jp-1")
+    assert code == 0 and "你自己的" in out and "不要分享" in out and "用户 alice" in out
+    line = user_line(node, node.users[0])
+    assert out.index(node.line) < out.index("用户 alice") < out.index(line) and share_link(line) in out
+
+
+def test_the_menu_shows_how_to_add_one_node(fake_deps):
+    assert run_up(fake_deps, aws="jp-tokyo") == 0
+    line = fake_deps.node().line
+    fake_deps.terminal.inputs = ["2", "1"]
+    code, out = run_list(fake_deps, menu=True)
+    assert code == 0 and line in out
+
+
+def test_the_menu_can_be_left_without_picking_a_node(fake_deps):
+    assert run_up(fake_deps, aws="jp-tokyo") == 0
+    line = fake_deps.node().line
+    fake_deps.terminal.inputs = ["1"]
+    code, out = run_list(fake_deps, menu=True)
+    assert code == 0 and line not in out
+
+
+def test_the_menu_adds_a_user(fake_deps):
+    assert run_up(fake_deps, aws="jp-tokyo") == 0
+    fake_deps.terminal.inputs = ["2", "2", "Alice", "alice"]  # a bad name is asked again
+    code, out = run_list(fake_deps, menu=True)
+    assert code == 0, out
+    (alice,) = fake_deps.node().users
+    assert alice.name == "alice" and user_line(fake_deps.node(), alice) in out
+
+
+def test_the_menu_takes_a_user_back(fake_deps):
+    assert run_up(fake_deps, aws="jp-tokyo") == 0
+    fake_deps.terminal.inputs = ["2", "2", "alice"]
+    run_list(fake_deps, menu=True)
+    fake_deps.terminal.inputs = ["2", "3", "1", "1"]  # the node, take back, alice, confirm
+    code, out = run_list(fake_deps, menu=True)
+    assert code == 0 and fake_deps.node().users == [], out
+
+
+def test_the_menu_resets_the_owner(fake_deps):
+    assert run_up(fake_deps, aws="jp-tokyo") == 0
+    before = fake_deps.node().xray.uuid
+    fake_deps.terminal.inputs = ["2", "3", "1"]  # the node, reset (nobody to take back), confirm
+    code, out = run_list(fake_deps, menu=True)
+    assert code == 0 and fake_deps.node().xray.uuid != before, out
+
+
+def test_the_menu_does_not_offer_to_take_back_nobody(fake_deps):
+    assert run_up(fake_deps, aws="jp-tokyo") == 0
+    fake_deps.terminal.inputs = ["2", "1"]
+    _, out = run_list(fake_deps, menu=True)
+    assert "收回用户" not in out
+
+
+def test_the_menu_asks_nothing_without_a_node_to_share(fake_deps):
+    assert run_up(fake_deps, aws="jp-tokyo", features=["harden"]) == 0
+    fake_deps.terminal.inputs = []
+    code, out = run_list(fake_deps, menu=True)
+    assert code == 0 and "管理" not in out
+
+
+def test_the_command_itself_asks_nothing(fake_deps):
+    assert run_up(fake_deps, aws="jp-tokyo") == 0
+    fake_deps.terminal.inputs = []
+    assert run_list(fake_deps)[0] == 0
+    assert fake_deps.terminal.prompts == []
+
+
+def test_a_shared_node_is_masked_in_the_log(fake_deps, tmp_path):
+    assert run_up(fake_deps, aws="jp-tokyo") == 0
+    uuid = fake_deps.node().xray.uuid
+    with runlog.started(tmp_path, "list", "jp-1", ["list", "jp-1"]) as run:
+        _, out = run_list(fake_deps, "jp-1")
+    assert uuid in fake_deps.terminal.screen and uuid not in run.path.read_text(encoding="utf-8")

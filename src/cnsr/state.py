@@ -47,6 +47,17 @@ class XrayInfo:
 
 
 @dataclass
+class XrayUser:
+    """Someone the node was shared with: a client of its own, so it can be taken back alone."""
+
+    name: str
+    uuid: str
+
+    def __post_init__(self) -> None:
+        runlog.secret(self.uuid)
+
+
+@dataclass
 class Node:
     """One proxy node. The control-plane Worker reads ``alias`` and ``line`` from the JSON form."""
 
@@ -74,6 +85,8 @@ class Node:
     ipv6_probe_failed: bool = False
     # What finished runs of ``cnsr up`` left on the server (see cnsr.features); empty until one did.
     features: list[str] = field(default_factory=list)
+    # The people the node was shared with, besides the owner (``xray.uuid``, the one in the subscription).
+    users: list[XrayUser] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         runlog.secret(self.node_token)
@@ -91,6 +104,10 @@ class Node:
         for key, nested in (("ssh", SshInfo), ("xray", XrayInfo)):
             if data.get(key) is not None:
                 data[key] = _build(nested, data[key])
+        users = data.get("users", [])
+        if not isinstance(users, list):
+            raise ValueError("users is not a list")
+        data["users"] = [_build(XrayUser, user) for user in users]
         return _build(cls, data)
 
 

@@ -13,6 +13,7 @@ import json
 import random
 import re
 import uuid
+from collections.abc import Sequence
 from importlib import resources
 
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
@@ -20,6 +21,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from cnsr.errors import CnsrError
 from cnsr.server.preflight import NODE_DIR
+from cnsr.state import XrayUser
 
 XRAY_IMAGE = "ghcr.io/xtls/xray-core:26.3.27"
 # What Xray listens on, opened in the takeover check and the Lightsail firewall.
@@ -91,11 +93,20 @@ def compose_text() -> str:
 
 
 def render_config(
-    template: dict, *, alias: str, uuid: str, private_key: str, short_id: str, sni: str, dest_ip: str
+    template: dict,
+    *,
+    alias: str,
+    uuid: str,
+    private_key: str,
+    short_id: str,
+    sni: str,
+    dest_ip: str,
+    users: Sequence[XrayUser] = (),
 ) -> str:
     """The server config for one node as JSON text; ``template`` is not changed.
 
-    The inbound tag becomes ``alias`` and the client email ``<alias>@cnsr``. REALITY borrows the
+    The inbound tag becomes ``alias`` and the owner's client email ``<alias>@cnsr``; the users'
+    clients follow the owner's (``with_users``). REALITY borrows the
     certificate of ``sni``, fetched from ``dest_ip``:443.
     """
     config = copy.deepcopy(template)
@@ -109,6 +120,35 @@ def render_config(
     reality["shortIds"] = [short_id]
     reality["serverNames"] = [sni]
     reality["dest"] = f"{dest_ip}{_DEST_PORT}"
+    _set_users(config, alias, users)
+    return _text(config)
+
+
+def with_users(config_text: str, alias: str, users: Sequence[XrayUser]) -> str:
+    """A config on the node with exactly ``users`` as its clients after the owner's, the rest as it is."""
+    read_identity(config_text)  # a config without an owner is an error
+    config = json.loads(config_text.removeprefix("\ufeff"))
+    _set_users(config, alias, users)
+    return _text(config)
+
+
+def with_owner(config_text: str, uuid: str) -> str:
+    """A config on the node with ``uuid`` as its owner's, the rest as it is."""
+    read_identity(config_text)
+    config = json.loads(config_text.removeprefix("\ufeff"))
+    config["inbounds"][0]["settings"]["clients"][0]["id"] = uuid
+    return _text(config)
+
+
+def _set_users(config: dict, alias: str, users: Sequence[XrayUser]) -> None:
+    settings = config["inbounds"][0]["settings"]
+    owner = settings["clients"][0]
+    # While a reset of the owner is under way, the record may name the owner's UUID as a user already.
+    others = [user for user in users if user.uuid != owner["id"]]
+    settings["clients"] = [owner, *({**owner, "id": user.uuid, "email": f"{user.name}@{alias}"} for user in others)]
+
+
+def _text(config: dict) -> str:
     return json.dumps(config, indent=2, ensure_ascii=False) + "\n"
 
 

@@ -33,7 +33,7 @@ def hz(fake_deps):
 
 def run_list(fakes) -> tuple[int, str]:
     fakes.terminal.clear()
-    code = listing.run(argparse.Namespace(command="list", alias=None), fakes.deps)
+    code = listing.run(argparse.Namespace(command="list", alias=None, menu=False), fakes.deps)
     return code, fakes.terminal.text
 
 

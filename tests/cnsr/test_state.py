@@ -6,7 +6,7 @@ import pytest
 
 from cnsr import naming
 from cnsr.errors import CnsrError
-from cnsr.state import ControlMeta, Inventory, Node, SshInfo, XrayInfo
+from cnsr.state import ControlMeta, Inventory, Node, SshInfo, XrayInfo, XrayUser
 
 META = ControlMeta(host="edge-cache-v123.example.com", zone="example.com", client_token="ct", admin_token="at")
 
@@ -338,3 +338,30 @@ def test_tokens_and_uuid_are_registered(monkeypatch):
     Node(alias="jp-1", source="vps", ipv4="192.0.2.1")  # no token yet: nothing to register
     assert [v for v in registered if v is not None] == []
 
+
+
+# --- users ---
+
+
+def test_users_survive_the_record():
+    node = full_node()
+    node.users = [XrayUser("alice", "u-1"), XrayUser("bob", "u-2")]
+    assert Node.from_json(node.to_json()) == node
+
+
+def test_a_record_from_before_users_has_none():
+    data = json.loads(full_node().to_json())
+    del data["users"]
+    assert Node.from_json(json.dumps(data)).users == []
+
+
+@pytest.mark.parametrize("users", ["alice", [{"name": "alice"}], ["alice"], {"alice": "u-1"}])
+def test_a_broken_user_list_is_a_broken_record(users):
+    data = json.loads(full_node().to_json()) | {"users": users}
+    with pytest.raises(ValueError):
+        Node.from_json(json.dumps(data))
+
+
+@pytest.mark.parametrize("name,ok", [("alice", True), ("a-1_b", True), ("Alice", False), ("", False), ("-a", False), ("小明", False)])
+def test_validate_user(name, ok):
+    assert (naming.validate_user(name) is None) == ok

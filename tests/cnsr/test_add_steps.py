@@ -10,7 +10,7 @@ from deploy_fakes import AWS_IP, AWS_IPV6, VPS_IP, agent_key, preflight_output, 
 from cnsr.cloudflare import control
 from cnsr.cloudflare.control import ProbeResult
 from cnsr.deploy import steps_sni
-from cnsr.deploy.steps_node import RESTART_MARKER
+from cnsr.deploy.apply_config import RESTART_MARKER
 from cnsr.errors import CnsrError
 from cnsr.scan.egress import Egress
 from cnsr.scan.probe import Hit
@@ -371,15 +371,15 @@ def test_interrupted_restart_is_finished_on_rerun(fake_deps):
     restart = f"docker compose -f {COMPOSE_PATH} restart"
     assert run_up(fake_deps, aws="jp-tokyo") == 0
     fake_deps.server.files[CONFIG_PATH] = fake_deps.server.files[CONFIG_PATH].replace('"loglevel"', '"logLevel"')
-    fake_deps.server.fail_on[restart] = CnsrError("重启失败")
+    fake_deps.server.apply_outcome = None  # the node never says what came of it
     assert run_up(fake_deps, aws="jp-tokyo") == 1
     assert RESTART_MARKER in fake_deps.server.files and '"logLevel"' not in fake_deps.server.files[CONFIG_PATH]
 
-    del fake_deps.server.fail_on[restart]
+    fake_deps.server.apply_outcome = "ok"
     logged = len(fake_deps.server.log)
     assert run_up(fake_deps, aws="jp-tokyo") == 0  # the config is unchanged now, but Xray never loaded it
     rerun = fake_deps.server.what()[logged:]
-    assert restart in rerun and rerun.index(restart) < rerun.index("verify-reality.sh")
+    assert restart in rerun
     assert RESTART_MARKER not in fake_deps.server.files
 
     logged = len(fake_deps.server.log)

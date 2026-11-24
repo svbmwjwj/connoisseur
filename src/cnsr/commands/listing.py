@@ -1,4 +1,5 @@
-"""``cnsr list``: the servers in the control plane and how devices subscribe to their nodes.
+"""``cnsr list``: the servers in the control plane and how devices subscribe to their nodes, or how to
+add one node by hand (``cnsr list <alias>``).
 
 Read only: nothing is created in Cloudflare, and no server is contacted. The one call out is a
 read of each Hetzner server's traffic, with a token already at hand.
@@ -13,10 +14,12 @@ from rich.text import Text
 
 from cnsr import features, localconf
 from cnsr.cloudflare.control import find_control_plane
+from cnsr.commands import sharing, user
 from cnsr.commands.token_hint import saved_token_hint
 from cnsr.aws.lightsail import Lightsail
 from cnsr.deploy.context import Deps, default_deps, known_hetzner, known_lightsail
 from cnsr.errors import CnsrError
+from cnsr.naming import validate_user
 from cnsr.hetzner.cloud import Hetzner
 from cnsr.sizes import terabytes
 from cnsr.qx import check_tasks, snippet_url, v2rayn_url
@@ -29,21 +32,28 @@ COLUMN_STYLES = ("bold", "", "", "dim", "", "cyan", "", "red")  # alias, domain,
 LABEL = "v2rayN 订阅  "  # the widest subscription label and its gap
 # How the traffic column reaches each cloud: the client for a region, None without credentials.
 KNOWN = {"hetzner": known_hetzner, "aws": known_lightsail}
+NODE_PROMPT = "要查看或管理哪台节点？"
+NODE_NONE = "都不，结束"
+SHOW, ADD_USER, REMOVE_USER, RESET = "查看添加方式", "添加用户", "收回用户", "更换主用户"
 AWS_NOTE = "AWS 流量为本月入站加出站；同区域同套餐的实例合用额度"
 
 
 def run(ns: Namespace, deps: Deps | None = None) -> int:
-    """Print the servers, and both subscriptions when one runs an Xray node; 1 without a control plane."""
+    """Print the servers, and both subscriptions when one runs an Xray node; 1 without a control plane.
+
+    With an alias, print only how to add that node by hand. From the top-level menu, also offer
+    that, and the node's users, for one of the servers listed.
+    """
     deps = deps or default_deps()
     try:
         with saved_token_hint(deps.conf_path):
-            return _list(deps)
+            return _list(deps, ns.alias, menu=ns.menu)
     except CnsrError as exc:
         deps.ui.error(str(exc))
         return 1
 
 
-def _list(deps: Deps) -> int:
+def _list(deps: Deps, alias: str | None, menu: bool) -> int:
     ui = deps.ui
     values = localconf.load(deps.conf_path)
     token, zone = values.get("CLOUDFLARE_API_TOKEN"), values.get("CLOUDFLARE_ZONE")
@@ -54,6 +64,12 @@ def _list(deps: Deps) -> int:
         raise CnsrError("还没有服务器（这个 Cloudflare 账号里还没有控制端）。")
     kv, meta, _ = found
     inventory = Inventory(kv)
+    if alias is not None:
+        node = inventory.get(alias)
+        if node is None:
+            raise CnsrError(f"没有名为 {alias} 的服务器。")
+        sharing.show_node(deps.ui, node)
+        return 0
     nodes = [node for node in map(inventory.get, inventory.aliases()) if node is not None]
 
     if not nodes:
@@ -61,7 +77,33 @@ def _list(deps: Deps) -> int:
         return 0
     ui.styled(Text.assemble(("服务器", "bold"), (f"  {len(nodes)} 台", "dim")))
     show(deps, nodes, meta)
+    if menu:
+        _offer_one(deps, nodes)
     return 0
+
+
+def _offer_one(deps: Deps, nodes: list[Node]) -> None:
+    """Ask which of the Xray nodes to look at or manage, if any, and what to do with it."""
+    shareable = [node for node in nodes if sharing.shareable(node)]
+    if not shareable:
+        return
+    ui = deps.ui
+    ui.info("")
+    picked = ui.choose(NODE_PROMPT, [NODE_NONE, *(node.alias for node in shareable)])
+    if not picked:
+        return
+    node = shareable[picked - 1]
+    actions = [SHOW, ADD_USER, *([REMOVE_USER] if node.users else []), RESET]
+    action = actions[ui.choose(f"要对 {node.alias} 做什么？", actions)]
+    if action == SHOW:
+        sharing.show_node(ui, node)
+    elif action == ADD_USER:
+        user.add(deps, node.alias, ui.ask("用户名字（例如 alice）", validate=validate_user))
+    elif action == RESET:
+        user.reset(deps, node.alias)
+    else:
+        names = [known.name for known in node.users]
+        user.remove(deps, node.alias, names[ui.choose("收回哪个用户？", names)])
 
 
 def show(deps: Deps, nodes: list[Node], meta: ControlMeta, cloud: Hetzner | Lightsail | None = None) -> None:

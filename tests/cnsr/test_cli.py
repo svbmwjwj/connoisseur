@@ -85,7 +85,7 @@ def commands(monkeypatch):
     calls = {}
     package = types.ModuleType("cnsr.commands")
     package.__path__ = []
-    for name in ("up", "rm", "listing"):
+    for name in ("up", "rm", "listing", "user"):
         module = types.ModuleType(f"cnsr.commands.{name}")
 
         def run(ns, name=name):
@@ -99,7 +99,7 @@ def commands(monkeypatch):
     return calls
 
 
-@pytest.mark.parametrize("argv", [["rm", "-h"], ["up", "-h"], ["up", "x", "--help"]])
+@pytest.mark.parametrize("argv", [["rm", "-h"], ["up", "-h"], ["up", "x", "--help"], ["list", "x", "-h"], ["user", "-h"], ["user", "add", "-h"]])
 def test_help_flag_after_command(argv, capsys):
     assert main(argv) == 0
     assert capsys.readouterr().out == HELP_TEXT
@@ -120,6 +120,31 @@ def test_dispatch_rm(commands):
 def test_dispatch_list(commands):
     assert main(["list"]) == 0
     assert list(commands) == ["listing"]
+
+
+def test_dispatch_list_with_an_alias(commands):
+    assert main(["list", "jp-1"]) == 0
+    assert (commands["listing"].alias, commands["listing"].menu) == ("jp-1", False)
+
+
+@pytest.mark.parametrize("action", ["add", "rm"])
+def test_dispatch_user(commands, action):
+    assert main(["user", action, "jp-1", "alice"]) == 0
+    assert list(commands) == ["user"]
+    ns = commands["user"]
+    assert (ns.action, ns.alias, ns.name) == (action, "jp-1", "alice")
+
+
+def test_user_needs_an_action_an_alias_and_a_name(capsys):
+    assert main(["user"]) == 2 and "缺少必需的参数" in capsys.readouterr().err
+    assert main(["user", "add", "jp-1"]) == 2 and "缺少必需的参数" in capsys.readouterr().err
+    assert main(["user", "drop", "jp-1", "alice"]) == 2 and "add、rm 或 reset" in capsys.readouterr().err
+
+
+def test_dispatch_user_reset(commands):
+    assert main(["user", "reset", "jp-1"]) == 0
+    ns = commands["user"]
+    assert (ns.action, ns.alias, ns.name) == ("reset", "jp-1", None)
 
 
 def test_dispatch_returns_command_exit_code(monkeypatch, commands):
@@ -308,7 +333,7 @@ def test_no_command_in_a_terminal_opens_the_menu(monkeypatch, commands, pick, co
     monkeypatch.setattr(cnsr.menu, "terminal_select", lambda: menu)
     assert main([]) == 0
     assert asked == [("要做什么？", ["部署服务器", "删除服务器", "服务器列表"])]
-    assert list(commands) == [command] and commands[command].alias is None
+    assert list(commands) == [command] and commands[command].alias is None and commands[command].menu
 
 
 def test_no_command_without_a_terminal_prints_help(monkeypatch, capsys):

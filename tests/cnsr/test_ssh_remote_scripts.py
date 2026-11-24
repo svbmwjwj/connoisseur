@@ -45,6 +45,7 @@ def test_each_script_has_its_own_time_limit(fake_assets, name, limit):
 def test_every_bundled_script_has_a_time_limit():
     bundled = {path.name for path in remote.resources.files("cnsr.assets.node").iterdir() if path.name.endswith(".sh")}
     run_by_add = bundled - {"cnsr-rotate.sh", "rotate-control.sh", "rotate-switch.sh", "china-check.sh"}  # the service's
+    run_by_add -= {"apply-config.sh"}  # systemd runs it on the node
     assert run_by_add <= set(remote.SCRIPT_TIMEOUTS)
 
 

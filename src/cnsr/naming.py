@@ -1,4 +1,4 @@
-"""Names generated or checked by cnsr: the control host label and node aliases."""
+"""Names generated or checked by cnsr: the control host label, node aliases and their users."""
 
 from __future__ import annotations
 
@@ -24,3 +24,10 @@ def validate_alias(alias: str) -> str | None:
     if _ALIAS.fullmatch(alias):
         return None
     return "别名只能包含小写字母、数字、连字符和下划线，必须以字母或数字开头，最长 32 个字符。"
+
+
+def validate_user(name: str) -> str | None:
+    """Return None when ``name`` is a usable user name, else a Chinese reason."""
+    if _ALIAS.fullmatch(name):
+        return None
+    return "用户名字只能包含小写字母、数字、连字符和下划线，必须以字母或数字开头，最长 32 个字符。"

@@ -1,9 +1,12 @@
-"""The client lines cnsr prints and serves: one node line, the Quantumult X config sections, and the
-v2rayN subscription address."""
+"""The client lines cnsr prints and serves: one node line and its share link, the Quantumult X config
+sections, and the v2rayN subscription address."""
 
 from __future__ import annotations
 
-from cnsr.state import ControlMeta, XrayInfo
+from dataclasses import replace
+from urllib.parse import quote, urlencode
+
+from cnsr.state import ControlMeta, Node, XrayInfo, XrayUser
 
 
 def node_line(domain: str, x: XrayInfo, alias: str) -> str:
@@ -16,6 +19,35 @@ def node_line(domain: str, x: XrayInfo, alias: str) -> str:
         f"reality-base64-pubkey={x.public_key}, reality-hex-shortid={x.short_id}, "
         f"vless-flow=xtls-rprx-vision, udp-relay=true, tag={alias}"
     )
+
+
+def user_line(node: Node, user: XrayUser) -> str:
+    """The server line for someone the node was shared with: the node's, with their own UUID and tag."""
+    return node_line(node.domain, replace(node.xray, uuid=user.uuid), f"{node.alias}-{user.name}")
+
+
+def share_link(line: str) -> str | None:
+    """A node line as the VLESS REALITY link v2rayN and others import, as ``v2raynLink`` of the Worker
+    makes it; None when the line is not a complete VLESS REALITY one."""
+    found = {key.strip(): value.strip() for key, equals, value in (part.partition("=") for part in line.split(",")) if equals}
+    try:
+        host, uuid, sni = found["vless"], found["password"], found["obfs-host"]
+        public_key, short_id = found["reality-base64-pubkey"], found["reality-hex-shortid"]
+    except KeyError:
+        return None
+    params = {
+        "encryption": "none",
+        "flow": found.get("vless-flow"),
+        "security": "reality",
+        "sni": sni,
+        "fp": "chrome",
+        "pbk": public_key,
+        "sid": short_id,
+        "type": "tcp",
+        "headerType": "none",
+    }
+    query = urlencode({key: value for key, value in params.items() if value})
+    return f"vless://{quote(uuid, safe='')}@{host}?{query}#{quote(found.get('tag', host), safe='')}"
 
 
 def check_url(meta: ControlMeta) -> str:

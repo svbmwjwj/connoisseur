@@ -42,8 +42,14 @@ cnsr  部署并加固服务器，可选自建 REALITY 节点（SNI 失效时自�
   rm [别名]             删除服务器；AWS 服务器同时删除实例、释放静态 IP；Hetzner 服务器
                         同时删除服务器、Primary IP 和防火墙（SSH key 保留）；不写别名时
                         列出所有服务器勾选，可多选；删除前确认一次（直接回车为取消）
-  list                  服务器列表，云服务器带本月流量（AWS 为入站加出站）；有 Xray 节点时
-                        同时列出圈X 和 v2rayN 订阅地址，以及加到圈X [task_local] 的检测任务
+  list [别名]           服务器列表，云服务器带本月流量（AWS 为入站加出站）；有 Xray 节点时
+                        同时列出圈X 和 v2rayN 订阅地址，以及加到圈X [task_local] 的检测任务；
+                        写别名时只列出这一台的添加方式（圈X 配置行和 vless 链接）和它的用户
+  user add <别名> <名字>
+                        把一台 Xray 节点分享给一个人：生成单独的 UUID 并打印添加方式
+  user rm <别名> <名字> 收回一个人的使用权，不影响其他人；确认一次（直接回车为取消）
+  user reset <别名>     更换主用户（订阅里的那个）的 UUID，旧的先保留为一个用户，设备都更新
+                        订阅后再收回；确认一次（直接回车为取消）
 
 新开服务器时，开始部署前会打印等价命令（不含 --static-ip），换一个别名即可按同样的配置再开一台。
 对已有别名再次运行 up：续跑没完成的步骤、可以补选功能、补充备选 SNI，并更新到当前版本。
@@ -99,6 +105,8 @@ def _explain(message: str) -> str:
         if word and word[1] in LEGACY_REGIONS:
             return f"--aws 的区域 {word[1]} 已改为 {LEGACY_REGIONS[word[1]]}"
         return f"--aws 的区域只能是 {'、'.join(AWS_REGIONS)}"
+    if "argument action:" in message:
+        return "cnsr user 后面要写 add、rm 或 reset"
     if word := _INVALID_CHOICE.search(message):
         return f"未知命令“{word[1]}”。命令写在最前面：部署服务器用 cnsr up <别名>，删除服务器用 cnsr rm <别名>"
     if "invalid choice" in message:
@@ -121,7 +129,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = _ArgumentParser(prog="cnsr", add_help=False)
     parser.add_argument("-h", "--help", action=_HelpAction)
     parser.add_argument("--version", action="version", version=f"cnsr {__version__}")
-    parser.set_defaults(alias=None, aws=None, hetzner=None, ip=None, static_ip=None, size=None, to=None)
+    parser.set_defaults(alias=None, aws=None, hetzner=None, ip=None, static_ip=None, size=None, to=None, menu=False, name=None)
     commands = parser.add_subparsers(dest="command")
 
     up = commands.add_parser("up", add_help=False)
@@ -141,6 +149,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
     listing = commands.add_parser("list", add_help=False)
     listing.add_argument("-h", "--help", action=_HelpAction)
+    listing.add_argument("alias", nargs="?")
+
+    user = commands.add_parser("user", add_help=False)
+    user.add_argument("-h", "--help", action=_HelpAction)
+    actions = user.add_subparsers(dest="action", required=True)
+    for name in ("add", "rm", "reset"):
+        action = actions.add_parser(name, add_help=False)
+        action.add_argument("-h", "--help", action=_HelpAction)
+        action.add_argument("alias")
+        if name != "reset":
+            action.add_argument("name")
     return parser
 
 
@@ -168,6 +187,10 @@ def _dispatch(ns: argparse.Namespace) -> int:
         from cnsr.commands import listing
 
         return listing.run(ns)
+    if ns.command == "user":
+        from cnsr.commands import user
+
+        return user.run(ns)
     from cnsr.commands import rm
 
     return rm.run(ns)
@@ -247,6 +270,7 @@ def main(argv: list[str] | None = None) -> int:
         if ns.command is None:
             sys.stdout.write(HELP_TEXT)
             return 0
+        ns.menu = True
     # Windows support is paused until its test failures are worked through.
     if sys.platform == "win32":
         sys.stderr.write("cnsr 暂不支持 Windows，请在 macOS 或 Linux 上运行。\n")

@@ -14,6 +14,7 @@ from importlib.resources import files
 import pytest
 
 from cnsr.errors import CnsrError
+from cnsr.state import XrayUser
 from cnsr.server.xray import (
     BACKUPS_PATH,
     COMPOSE_PATH,
@@ -28,6 +29,7 @@ from cnsr.server.xray import (
     parse_x25519,
     read_identity,
     render_config,
+    with_users,
 )
 
 ASSETS = files("cnsr.assets.xray")
@@ -270,3 +272,43 @@ def test_derive_public_key_of_a_clamped_private_key():
 def test_derive_public_key_rejects_malformed_keys(bad):
     with pytest.raises(CnsrError, match="私钥"):
         derive_public_key(bad)
+
+
+# ---- users -----------------------------------------------------------------------------------
+
+USERS = [XrayUser("alice", "22222222-2222-4222-8222-222222222222"), XrayUser("bob", "33333333-3333-4333-8333-333333333333")]
+
+
+def clients(text: str) -> list[dict]:
+    return json.loads(text)["inbounds"][0]["settings"]["clients"]
+
+
+def test_users_follow_the_owner_with_their_own_email():
+    owner, alice, bob = clients(render_config(template(), **RENDER, users=USERS))
+    assert owner == {"id": UUID, "flow": "xtls-rprx-vision", "email": "jp-1@cnsr", "level": 0}
+    assert alice == {**owner, "id": USERS[0].uuid, "email": "alice@jp-1"}
+    assert bob == {**owner, "id": USERS[1].uuid, "email": "bob@jp-1"}
+
+
+def test_the_identity_read_back_is_the_owners():
+    assert read_identity(render_config(template(), **RENDER, users=USERS))["uuid"] == UUID
+
+
+def test_with_users_gives_what_a_new_render_gives():
+    plain, full = render_config(template(), **RENDER), render_config(template(), **RENDER, users=USERS)
+    assert with_users(plain, "jp-1", USERS) == full
+    assert with_users(full, "jp-1", USERS[1:]) == render_config(template(), **RENDER, users=USERS[1:])
+    assert with_users(full, "jp-1", []) == plain
+
+
+def test_with_users_changes_nothing_but_the_clients():
+    config = json.loads(render_config(template(), **RENDER))
+    config["extra"] = {"kept": True}
+    out = json.loads(with_users(json.dumps(config), "jp-1", USERS))
+    out["inbounds"][0]["settings"]["clients"] = config["inbounds"][0]["settings"]["clients"]
+    assert out == config
+
+
+def test_with_users_rejects_a_config_it_cannot_read():
+    with pytest.raises(CnsrError):
+        with_users("{}", "jp-1", USERS)
