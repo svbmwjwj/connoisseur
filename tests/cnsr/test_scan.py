@@ -421,6 +421,17 @@ def test_shortlist_keeps_the_first_occurrence_in_order():
     assert shortlist([again, second, first]) == [again, second]
 
 
+def test_shortlist_takes_turns_between_the_22s():
+    # A whole /22 can be unreachable from the node, so no /22 may fill the list on its own.
+    crowded = [hit(f"a{i}.example.com", ip=f"198.18.0.{i + 1}") for i in range(40)]
+    also_crowded = [hit(f"b{i}.example.com", ip=f"198.18.4.{i + 1}") for i in range(40)]
+    sparse = [hit(f"c{i}.example.com", ip=f"198.18.12.{i + 1}") for i in range(5)]
+    result = shortlist(crowded + also_crowded + sparse)
+    assert result[:4] == [crowded[0], also_crowded[0], sparse[0], crowded[1]]
+    assert len(result) == 30 and set(sparse) <= set(result)
+    assert set(result) == {*crowded[:13], *also_crowded[:12], *sparse}
+
+
 def test_shortlist_filters_before_capping():
     hits = [hit("panel.example.com")] * 5 + [hit(f"www{i}.example.com") for i in range(4)]
     assert [h.domain for h in shortlist(hits, limit=3)] == ["www0.example.com", "www1.example.com", "www2.example.com"]

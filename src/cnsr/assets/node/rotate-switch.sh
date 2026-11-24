@@ -108,8 +108,25 @@ china_ok() {
     esac
 }
 
+# pool_ip <domain>: the first IPv4 address the node resolves it to now; 1 when there is none.
+pool_ip() {
+    local found
+    found=$(getent ahostsv4 "$1" </dev/null) || return 1
+    found=${found%%[[:space:]]*}
+    [[ $found =~ $IP_PATTERN ]] || return 1
+    printf '%s' "$found"
+}
+
 try_backup() {
     local domain=$1 ip=$2 entry=$3 passed
+    # A pool site's address changes; a neighbour is the address it was found at.
+    if [ "$(printf '%s' "$entry" | jq -r '.pool // false')" = true ]; then
+        ip=$(pool_ip "$domain") || {
+            node_online || { FAILURE=$OFFLINE_FAILURE; return 2; }
+            log "备选 $domain 现在解析不出地址，丢掉。"
+            return 1
+        }
+    fi
     passed=$(bash "$BIN/validate-candidates.sh" "$domain" "$ip" </dev/null) || {
         FAILURE="本机验证备选时出错"
         return 2

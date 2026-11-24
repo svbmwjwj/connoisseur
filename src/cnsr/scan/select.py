@@ -4,7 +4,9 @@
 + h2 request from the node itself. ``parse_validation`` reads that, ``choose`` picks the
 fastest as the current SNI and keeps the next ones as backups. ``backups_json`` and
 ``parse_backups`` are the one format of ``/opt/cnsr/backups.json``: a JSON array of
-``{"domain", "ip", "latency_ms"}`` objects, best first, without the current SNI.
+``{"domain", "ip", "latency_ms"}`` objects, best first, without the current SNI. An entry from the
+pool (``cnsr.scan.pool``) also has ``"pool": true``: the node resolves its domain again before use.
+One DNS does not place at its address has ``"foreign": true``.
 """
 
 from __future__ import annotations
@@ -23,11 +25,16 @@ _NO_CANDIDATE = "没有候选通过节点验证，已停止，不会盲选"
 
 @dataclass(frozen=True)
 class Candidate:
-    """A site on the node's network that answered from the node, and how fast (TLS connect, ms)."""
+    """A site that answered from the node, and how fast (TLS connect, ms): one on the node's network,
+    or with ``pool`` a well-known one from anywhere (``cnsr.scan.pool``). ``foreign``: the node
+    resolves the domain to other addresses than the one showing its certificate, which is then
+    most likely somebody's own node borrowing it (or the origin of a site behind a CDN)."""
 
     domain: str
     ip: str
     latency_ms: int
+    pool: bool = False
+    foreign: bool = False
 
 
 def parse_validation(text: str) -> list[Candidate]:
@@ -43,21 +50,30 @@ def parse_validation(text: str) -> list[Candidate]:
     return found
 
 
+def ranked(cands: list[Candidate]) -> list[Candidate]:
+    """The neighbours, fastest first, then the pool's in the order given (the order of its list),
+    then the foreign ones, fastest first."""
+    return sorted(cands, key=lambda cand: (cand.foreign, cand.pool, 0 if cand.pool else cand.latency_ms))
+
+
 def choose(cands: list[Candidate], max_backups: int = 10) -> tuple[Candidate, list[Candidate]]:
-    """The fastest candidate and up to ``max_backups`` next-fastest ones.
+    """The best candidate and up to ``max_backups`` next-best ones, as ``ranked`` orders them.
 
     Equal latencies keep their input order. With nothing to choose from this stops instead of
     guessing: a blind pick could be a site the node cannot reach.
     """
     if not cands:
         raise CnsrError(_NO_CANDIDATE)
-    ranked = sorted(cands, key=lambda cand: cand.latency_ms)
-    return ranked[0], ranked[1 : 1 + max(max_backups, 0)]
+    best = ranked(cands)
+    return best[0], best[1 : 1 + max(max_backups, 0)]
 
 
 def backups_json(backups: list[Candidate]) -> str:
     """The text of ``backups.json`` for these backups, best first."""
-    entries = [{"domain": b.domain, "ip": b.ip, "latency_ms": b.latency_ms} for b in backups]
+    entries = []
+    for b in backups:
+        marks = {name: True for name in ("pool", "foreign") if getattr(b, name)}
+        entries.append({"domain": b.domain, "ip": b.ip, "latency_ms": b.latency_ms, **marks})
     return json.dumps(entries, indent=2, ensure_ascii=False) + "\n"
 
 
@@ -81,7 +97,10 @@ def _backup(number: int, entry: object) -> Candidate:
         raise bad
     if not isinstance(latency, int) or isinstance(latency, bool) or latency < 0:
         raise bad
-    return Candidate(domain, ip, latency)
+    pool, foreign = entry.get("pool", False), entry.get("foreign", False)
+    if not isinstance(pool, bool) or not isinstance(foreign, bool):
+        raise bad
+    return Candidate(domain, ip, latency, pool, foreign)
 
 
 def _is_ip(text: str) -> bool:

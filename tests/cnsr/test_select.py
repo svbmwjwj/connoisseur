@@ -138,3 +138,41 @@ def test_parse_backups_names_the_bad_entry():
     text = '[{"domain": "a.example.com", "ip": "198.51.100.7", "latency_ms": 1}, {"domain": "b.example.com"}]'
     with pytest.raises(CnsrError, match="第 2 项"):
         parse_backups(text)
+
+
+def test_pool_candidates_come_after_every_neighbour_in_the_order_given():
+    near = Candidate("near.example.com", "198.51.100.7", 90)
+    pool = [Candidate("p1.example.com", "203.0.113.1", 50, pool=True), Candidate("p2.example.com", "203.0.113.2", 10, pool=True)]
+    assert choose([*pool, near]) == (near, pool)
+
+
+def test_backups_json_marks_pool_entries_only():
+    near, pool = Candidate("a.example.com", "198.51.100.7", 5), Candidate("b.example.com", "203.0.113.1", 6, pool=True)
+    text = backups_json([near, pool])
+    assert json.loads(text) == [
+        {"domain": "a.example.com", "ip": "198.51.100.7", "latency_ms": 5},
+        {"domain": "b.example.com", "ip": "203.0.113.1", "latency_ms": 6, "pool": True},
+    ]
+    assert parse_backups(text) == [near, pool]
+
+
+def test_a_pool_mark_that_is_not_true_or_false_is_rejected():
+    entry = {"domain": "a.example.com", "ip": "198.51.100.7", "latency_ms": 5, "pool": "yes"}
+    with pytest.raises(CnsrError):
+        parse_backups(json.dumps([entry]))
+
+
+def test_candidates_dns_does_not_place_there_come_last():
+    own = Candidate("own.example.com", "198.51.100.7", 90)
+    pool = Candidate("pool.example.com", "203.0.113.1", 50, pool=True)
+    slow, fast = (Candidate(f"{n}.example.com", "198.51.100.9", ms, foreign=True) for n, ms in (("slow", 30), ("fast", 10)))
+    assert choose([slow, fast, pool, own]) == (own, [pool, fast, slow])
+
+
+def test_backups_json_marks_foreign_entries_only():
+    cands = [Candidate("a.example.com", "198.51.100.7", 5), Candidate("b.example.com", "198.51.100.8", 6, foreign=True)]
+    text = backups_json(cands)
+    assert json.loads(text)[0].keys() == {"domain", "ip", "latency_ms"} and json.loads(text)[1]["foreign"] is True
+    assert parse_backups(text) == cands
+    with pytest.raises(CnsrError):
+        parse_backups(text.replace("true", '"yes"'))

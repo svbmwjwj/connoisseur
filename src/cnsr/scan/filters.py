@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ipaddress
+import itertools
 import re
 
 from cnsr.scan.probe import Hit, is_ip_address
@@ -84,18 +86,21 @@ def reputation_ok(domain: str) -> bool:
 
 
 def shortlist(hits: list[Hit], limit: int = 30) -> list[Hit]:
-    """The first ``limit`` acceptable hits, one per domain, in input order."""
-    chosen: list[Hit] = []
+    """Up to ``limit`` acceptable hits, one per domain, taken in turns from each /22 in input order.
+
+    A vendor may route the /22s of one /20 differently, so that a node cannot reach a whole /22
+    of its neighbours; taking turns keeps such a /22 from filling the list.
+    """
+    by_network: dict[ipaddress.IPv4Network, list[Hit]] = {}
     seen: set[str] = set()
     for h in hits:
-        if len(chosen) >= limit:
-            break
         domain = h.domain.lower()
         if domain in seen or not basic_ok(h) or not reputation_ok(domain):
             continue
         seen.add(domain)
-        chosen.append(h)
-    return chosen
+        by_network.setdefault(ipaddress.IPv4Network(f"{h.ip}/22", strict=False), []).append(h)
+    rounds = itertools.zip_longest(*by_network.values())
+    return [h for turn in rounds for h in turn if h is not None][:limit]
 
 
 def _has_suffix(domain: str, suffix: str) -> bool:

@@ -118,6 +118,13 @@ fi
 if [ -f "$FAKE_DIR/china-$1" ]; then cat "$FAKE_DIR/china-$1"; else echo pass; fi
 """
 
+# Prints FAKE_DIR/getent-<domain>; fails like the real one when there is none.
+FAKE_GETENT = r"""#!/bin/bash
+printf '%s\n' "getent $*" >> "$FAKE_DIR/calls.log"
+[ -f "$FAKE_DIR/getent-$2" ] || exit 2
+cat "$FAKE_DIR/getent-$2"
+"""
+
 # Fails for the SNIs listed in FAKE_DIR/self-check-fails, and with the status in
 # FAKE_DIR/verify.rc for every SNI (2: the check itself could not run). It keeps a copy of the values file
 # and its mode, then deletes it as the real script does. With FAKE_DIR/verify-blocks it
@@ -176,6 +183,7 @@ class Node:
         for name in (*REAL_TOOLS, "jq", "grep", "cut", "ls"):
             (self.bin / name).symlink_to(shutil.which(name))
         self._tool(self.bin / "curl", FAKE_CURL.replace("{python}", sys.executable))
+        self._tool(self.bin / "getent", FAKE_GETENT)
         self._tool(self.bin / "docker", FAKE_DOCKER.replace("{python}", sys.executable))
         self._tool(self.root / "bin" / "validate-candidates.sh", FAKE_VALIDATE)
         self._tool(self.root / "bin" / "verify-reality.sh", FAKE_VERIFY)
@@ -215,6 +223,16 @@ class Node:
     def backups(self, domains: list[tuple[str, str]]) -> None:
         entries = [{"domain": d, "ip": ip, "latency_ms": 40 + n} for n, (d, ip) in enumerate(domains)]
         self.write("backups.json", json.dumps(entries, indent=2) + "\n")
+
+    def pool_backups(self, *domains: tuple[str, str]) -> None:
+        """Backups from the pool; the address is the one at the time of the deployment."""
+        entries = [{"domain": d, "ip": ip, "latency_ms": 40, "pool": True} for d, ip in domains]
+        self.write("backups.json", json.dumps(entries, indent=2) + "\n")
+
+    def resolves(self, domain: str, *addresses: str) -> None:
+        """What ``getent ahostsv4`` prints for ``domain``."""
+        lines = [f"{ip}  {kind} {domain}" for ip in addresses for kind in ("STREAM", "DGRAM", "RAW")]
+        (self.base / f"getent-{domain}").write_text("\n".join(lines) + "\n")
 
     def backup_domains(self) -> list[str]:
         return [entry["domain"] for entry in json.loads(self.read("backups.json"))]

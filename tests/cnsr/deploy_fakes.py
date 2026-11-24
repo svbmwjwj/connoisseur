@@ -83,6 +83,14 @@ class FakeServer:
         self.timer, self.timer_stop_fails = "unloaded", False  # the transient revert timer, as in harden_fakes
         self.latency: dict[str, int] = {}  # domain -> ms; a domain missing here fails validation
         self.reality_fails: set[str] = set()  # domains a REALITY server cannot borrow (reality-candidates.sh)
+        self.country: str | CnsrError = ""  # what Cloudflare's trace says, or the failure of the request
+        self.resolves: dict[str, str | list[str]] = {}  # domain -> what the node resolves it to
+        self.reverse: dict[str, str] = {}  # address -> its name in reverse DNS
+        self.scanned: dict[str, str] = {}  # domain -> address of every scanned neighbour: what it resolves to unless above
+        # What apply-config.sh comes to; None: it dies after the restart and reports nothing.
+        self.apply_outcome: str | None = "ok"
+        self.restart_cuts = 0  # how many connections its restart of Xray cuts, the launch's included
+        self._cut = 0
         self.ufw_allowed: set[str] = set()  # rules `ufw allow` added, such as "443/tcp"
         self.script_args: dict[str, list[str]] = {}  # the last arguments each script ran with
         self.script_calls: dict[str, list[list[str]]] = {}  # the arguments of each run of each script
@@ -117,6 +125,9 @@ class FakeServer:
             raise
 
     def _connect(self, target: Target, what: str) -> None:
+        if self._cut:
+            self._cut -= 1
+            raise SshError("other")
         if target.hostname in self.blocked_hosts:
             raise SshError("port")
         if self.hostkey_stale:
@@ -174,6 +185,22 @@ class FakeServer:
         if head == ["ufw", "allow"]:
             self.ufw_allowed.add(command[2])
             return ""
+        if head[0] == "systemd-run":
+            return self._apply_config(command)
+        if head == ["sh", "-c"] and command[2].startswith("cat "):
+            return self.files.get(command[-1], "")
+        if command[0] == "curl" and command[-1].endswith("/cdn-cgi/trace"):
+            if isinstance(self.country, CnsrError):
+                raise self.country
+            return f"fl=1\nip=203.0.113.9\nloc={self.country}\n"
+        if head == ["sh", "-c"] and "getent hosts" in command[2]:
+            return "".join(f"{ip} {self.reverse[ip]}\n" for ip in command[4:] if ip in self.reverse)
+        if head == ["sh", "-c"] and "getent" in command[2]:
+            lines = []
+            for domain in command[4:]:
+                found = self.resolves.get(domain, self.scanned.get(domain, []))
+                lines += [f"{domain} {ip}\n" for ip in ([found] if isinstance(found, str) else found)]
+            return "".join(lines)
         if head == ["sh", "-c"]:  # DeployContext.exists
             return "yes\n" if command[-1] in self.files or command[-1] in self.dirs else "no\n"
         if head == ["mkdir", "-p"] or head == ["install", "-d"]:
@@ -218,6 +245,35 @@ class FakeServer:
             return ""
         assert "/opt/cnsr/bin/cnsr-rotate.sh" in self.files, "the service started before its script was there"
         self.service = "activating" if self.service_fails else "active"
+        return ""
+
+    def _apply_config(self, command: list[str]) -> str:
+        """apply-config.sh as systemd runs it: it goes on whatever becomes of the connection."""
+        conf, marker = "/opt/cnsr/xray/conf", "/opt/cnsr/xray/.restart-pending"
+        assert command[:6] == ["systemd-run", "--quiet", "--collect", "--unit=cnsr-apply-config", "bash",
+                               "/opt/cnsr/bin/apply-config.sh"], command  # fmt: skip
+        run_id, *options = command[6:]
+        assert options in ([], ["keep-stopped"])
+        assert command[5] in self.files and "/opt/cnsr/bin/verify-reality.sh" in self.files and self.service == "inactive"
+        assert self.modes["/opt/cnsr/verify.env"] == "600"
+        restart = ("root", 0, "node", "docker compose -f /opt/cnsr/xray/compose.yml restart")
+        before = self.files[f"{conf}/config.json"]
+        self.files[f"{conf}/config.json"] = self.files.pop(f"{conf}/config.new.json")
+        self.files[marker] = ""
+        self.log.append(restart)
+        outcome = self.apply_outcome
+        if outcome is not None:
+            if outcome != "ok":
+                self.files[f"{conf}/config.json"] = before
+                self.log.append(restart)
+            if outcome != "failed":
+                del self.files[marker]
+            self.files.pop("/opt/cnsr/verify.env")
+            self.service = "inactive" if options else "active"
+            self.files["/opt/cnsr/apply-result"] = f"{run_id} {outcome}\n"
+        if self.restart_cuts:
+            self._cut, self.restart_cuts = self.restart_cuts - 1, 0
+            raise SshError("other")
         return ""
 
     def _x25519(self, command: list[str]) -> str:
@@ -392,9 +448,11 @@ class DeployFakes:
         self.calls["scan"].append(ips)
         for done in range(1, len(ips) + 1) if progress is not None else ():
             progress(done, len(ips))
-        if self.hits is not None:
-            return self.hits
-        return [Hit(f"203.0.113.{10 + i}", f"site{i}.example.com", "Example CA", False) for i in range(12)]
+        hits = self.hits
+        if hits is None:
+            hits = [Hit(f"203.0.113.{10 + i}", f"site{i}.example.com", "Example CA", False) for i in range(12)]
+        self.server.scanned |= {hit.domain: hit.ip for hit in hits}
+        return hits
 
     def _direct_address(self) -> str | None:
         queued = self.egress_result

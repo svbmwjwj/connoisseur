@@ -150,7 +150,7 @@ def test_scan_covers_the_neighbourhood_only(fake_deps):
 def test_no_candidates_stop(fake_deps):
     fake_deps.hits = []
     assert run_up(fake_deps, aws="jp-tokyo") == 1
-    assert "没有找到" in fake_deps.terminal.text
+    assert "不会盲选" in fake_deps.terminal.text
     assert not fake_deps.server.did("validate-candidates.sh") and not fake_deps.server.did("reality-candidates.sh")
 
 

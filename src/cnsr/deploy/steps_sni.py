@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import ipaddress
+import re
+from dataclasses import replace
+
 from cnsr.deploy.context import DeployContext
 from cnsr.deploy.steps_rotate import stop_rotation
 from cnsr.errors import CnsrError
+from cnsr.scan import pool
 from cnsr.scan.egress import FAKE_IP_NETWORK, Egress, client_address, is_direct
 from cnsr.scan.filters import shortlist
 from cnsr.scan.ranges import scan_network, scan_targets
-from cnsr.scan.select import Candidate, backups_json, choose, parse_backups, parse_validation
+from cnsr.scan.select import Candidate, backups_json, choose, parse_backups, parse_validation, ranked
 from cnsr.server.xray import BACKUPS_PATH, CONFIG_PATH, read_identity
 from cnsr.ssh.remote import SshError
 
@@ -17,6 +22,12 @@ from cnsr.ssh.remote import SshError
 MAX_BACKUPS = 30
 REFILL_BELOW = 10
 UNKNOWN_EGRESS_OPTIONS = ["确认是直连，继续扫描", "停止"]
+# Run on the node: prints "<domain> <address>" for every address each argument resolves to.
+RESOLVE = 'for d in "$@"; do getent ahostsv4 "$d" | while read -r ip _; do echo "$d $ip"; done; done; true'
+# The same for addresses: prints "<address> <name>" for each one with a name in reverse DNS.
+REVERSE = 'for ip in "$@"; do getent hosts "$ip" | while read -r _ name _; do echo "$ip $name"; done; done; true'
+TRACE_URL = "https://www.cloudflare.com/cdn-cgi/trace"
+_COUNTRY = re.compile(r"^loc=([A-Z]{2})$", re.MULTILINE)
 PROXIED_OPTIONS = ["已关闭代理，重新检查", "停止"]
 
 
@@ -52,12 +63,10 @@ def step_scan(ctx: DeployContext) -> None:
     short = shortlist(found)
     hits = [hit for hit in short if ctx.deps.sni_ok(hit.ip, hit.domain)]
     ui.detail(f"扫到 {len(found)} 个站点，过滤后剩 {len(short)} 个，带 SNI 握手成功 {len(hits)} 个。")
-    if hits:
-        ctx.hits = hits
-    elif configured:
-        ui.warn("这次没有扫到可用的候选，备选 SNI 保持不变。")
+    if hits or not configured:
+        ctx.hits = hits  # none at all on a first deployment: step_sni goes to the pool
     else:
-        raise CnsrError("节点附近没有找到可用的 SNI 候选，已停止，不会盲选。")
+        ui.warn("这次没有扫到可用的候选，备选 SNI 保持不变。")
 
 
 def step_sni(ctx: DeployContext) -> None:
@@ -66,7 +75,9 @@ def step_sni(ctx: DeployContext) -> None:
     The node first checks each candidate with curl, then tries the ones that pass with a real
     REALITY handshake (``reality-candidates.sh``, which needs the Docker of step 4). A node that already runs
     Xray keeps its current SNI; only its backups are replaced. A node whose deployment never
-    finished keeps its SNI only while it still passes, and otherwise gets a new one. New
+    finished keeps its SNI only while it still passes, and otherwise gets a new one. Too few
+    candidates are topped up from the pool, behind every neighbour (``_from_pool``) but the
+    foreign ones (``_place``), which come last. New
     backups end the control plane's "backups used up" mark for the node. An installed SNI
     rotation service is stopped first, as from here on the run changes the node's files.
     """
@@ -74,11 +85,13 @@ def step_sni(ctx: DeployContext) -> None:
     stop_rotation(ctx)
     if ctx.hits is None:
         ui.detail("沿用节点上已有的 SNI 和备选。")
+        _rerank_backups(ctx)
         return
     remote = ctx.remote()
     args = [value for hit in ctx.hits for value in (hit.domain, hit.ip)]
-    ui.detail(f"交给节点验证的候选：{'、'.join(f'{hit.domain}（{hit.ip}）' for hit in ctx.hits)}")
-    tls = parse_validation(remote.run_script("validate-candidates.sh", args))
+    if args:
+        ui.detail(f"交给节点验证的候选：{'、'.join(f'{hit.domain}（{hit.ip}）' for hit in ctx.hits)}")
+    tls = parse_validation(remote.run_script("validate-candidates.sh", args)) if args else []
     passed = _borrowable(ctx, tls) if tls else []
     ui.detail(f"节点验证了 {len(ctx.hits)} 个候选：TLS 检查通过 {len(tls)} 个，REALITY 握手通过 {len(passed)} 个。")
     config = ctx.read(CONFIG_PATH)
@@ -87,13 +100,18 @@ def step_sni(ctx: DeployContext) -> None:
         if not any(cand.domain == identity["sni"] and cand.ip == identity["dest_ip"] for cand in passed):
             ui.warn(f"节点还没有部署完成，它的 SNI {identity['sni']} 这次没有通过验证，改选新的 SNI。")
             config = None
+    current = read_identity(config)["sni"] if config is not None else None
+    usable = _place(ctx, [cand for cand in passed if cand.domain != current])
+    wanted = REFILL_BELOW + (1 if config is None else 0)  # the SNI itself, and enough backups
+    missing = wanted - sum(not cand.foreign for cand in usable)
+    if missing > 0:
+        usable += _from_pool(ctx, missing, {cand.domain for cand in usable} | {current})
     if config is None:
-        chosen, backups = choose(passed, MAX_BACKUPS)
+        chosen, backups = choose(usable, MAX_BACKUPS)
         ctx.sni = chosen
         ui.detail(f"选定 SNI：{chosen.domain}（{chosen.ip}，{chosen.latency_ms} 毫秒），备选 {len(backups)} 个。")
     else:
-        current = read_identity(config)["sni"]
-        backups = [cand for cand in _fastest_first(passed) if cand.domain != current][:MAX_BACKUPS]
+        backups = ranked(usable)[:MAX_BACKUPS]
         if not backups:
             ui.warn("没有新的候选通过节点验证，备选 SNI 保持不变。")
             return
@@ -170,6 +188,106 @@ def _borrowable(ctx: DeployContext, cands: list[Candidate]) -> list[Candidate]:
     return [cand for cand in cands if (cand.domain, cand.ip) in ok]
 
 
+def _from_pool(ctx: DeployContext, count: int, taken: set[str | None]) -> list[Candidate]:
+    """Up to ``count`` domains of the pool for the node's country, not in ``taken``, that pass every
+    check the neighbours pass, in the pool's order."""
+    ui, remote = ctx.deps.ui, ctx.remote()
+    domains = [domain for domain in pool.domains(_country(ctx)) if domain not in taken]
+    found = _resolve(ctx, domains)
+    pairs = [(domain, found[domain]) for domain in domains if domain in found]
+    pairs = [(domain, ip) for domain, ip in pairs if ctx.deps.sni_ok(ip, domain)]
+    passed: list[Candidate] = []
+    if pairs:
+        output = remote.run_script("validate-candidates.sh", [value for pair in pairs for value in pair])
+        tls = parse_validation(output)
+        passed = _borrowable(ctx, tls) if tls else []
+    chosen = [replace(cand, pool=True) for cand in passed[:count]]
+    named = "、".join(cand.domain for cand in chosen)
+    ui.detail(f"合格的邻居不够，从备用域名里补充 {len(chosen)} 个（还差 {count} 个）：{named or '没有通过检查的'}。")
+    return chosen
+
+
+def _country(ctx: DeployContext) -> str:
+    """The node's country as Cloudflare sees it, or an empty string."""
+    try:
+        text = ctx.remote().run(["curl", "-s", "--max-time", "8", TRACE_URL])
+    except SshError:
+        raise
+    except CnsrError:
+        return ""
+    match = _COUNTRY.search(text)
+    return match[1] if match else ""
+
+
+def _resolve(ctx: DeployContext, domains: list[str]) -> dict[str, str]:
+    """The first public IPv4 address the node resolves each domain to; a domain without one is missing."""
+    found = _addresses(ctx, domains)
+    first = {domain: next((ip for ip in ips if _is_public(ip)), None) for domain, ips in found.items()}
+    return {domain: ip for domain, ip in first.items() if ip is not None}
+
+
+def _addresses(ctx: DeployContext, domains: list[str]) -> dict[str, list[str]]:
+    """Every IPv4 address the node resolves each domain to; a domain it cannot resolve is missing."""
+    found: dict[str, list[str]] = {}
+    if not domains:
+        return found
+    for line in ctx.remote().run(["sh", "-c", RESOLVE, "sh", *domains]).splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[0] in domains:
+            found.setdefault(fields[0], []).append(fields[1])
+    return found
+
+
+def _place(ctx: DeployContext, cands: list[Candidate]) -> list[Candidate]:
+    """The candidates, each marked ``foreign`` when DNS does not place it at its address, nor at
+    another one of the same provider (a load balancer's addresses come and go).
+
+    A node that resolves none of them says nothing about any.
+    """
+    found = _addresses(ctx, [cand.domain for cand in cands if not cand.pool])
+    if not found:
+        return cands
+    astray = [cand for cand in cands if not cand.pool and cand.ip not in found.get(cand.domain, [])]
+    providers = _providers(ctx, {ip for cand in astray for ip in (cand.ip, *found.get(cand.domain, []))})
+    foreign = {
+        cand.domain
+        for cand in astray
+        if providers.get(cand.ip) is None
+        or providers[cand.ip] not in {providers.get(ip) for ip in found.get(cand.domain, [])}
+    }
+    if foreign:
+        ctx.deps.ui.detail(f"DNS 没有指向扫到的地址、可能是别人的节点，排到最后：{'、'.join(sorted(foreign))}。")
+    return [cand if cand.pool else replace(cand, foreign=cand.domain in foreign) for cand in cands]
+
+
+def _providers(ctx: DeployContext, ips: set[str]) -> dict[str, str]:
+    """Whose each address is: the last two labels of its name in reverse DNS, such as ``amazonaws.com``."""
+    found: dict[str, str] = {}
+    if not ips:
+        return found
+    for line in ctx.remote().run(["sh", "-c", REVERSE, "sh", *sorted(ips)]).splitlines():
+        fields = line.split()
+        labels = fields[1].rstrip(".").lower().split(".") if len(fields) == 2 else []
+        if len(labels) > 2 and fields[0] in ips:
+            found.setdefault(fields[0], ".".join(labels[-2:]))
+    return found
+
+
+def _rerank_backups(ctx: DeployContext) -> None:
+    """Put the foreign ones of the backups already on the node last."""
+    backups = _backups_on_node(ctx)
+    better = ranked(_place(ctx, backups))
+    if better != backups:
+        ctx.remote().put_text(BACKUPS_PATH, backups_json(better), "600")
+
+
+def _is_public(text: str) -> bool:
+    try:
+        return ipaddress.IPv4Address(text).is_global
+    except ValueError:
+        return False
+
+
 def _backups_on_node(ctx: DeployContext) -> list[Candidate]:
     text = ctx.read(BACKUPS_PATH)
     if text is None:
@@ -179,7 +297,3 @@ def _backups_on_node(ctx: DeployContext) -> list[Candidate]:
     except CnsrError as exc:
         ctx.deps.ui.warn(f"节点上的备选 SNI 列表无法读取，将重新扫描：{exc}")
         return []
-
-
-def _fastest_first(cands: list[Candidate]) -> list[Candidate]:
-    return sorted(cands, key=lambda cand: cand.latency_ms)
