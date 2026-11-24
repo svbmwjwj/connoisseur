@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import logging
 import random
 import shlex
@@ -36,7 +37,7 @@ from cnsr.scan.probe import Hit
 from cnsr.server.xray import XRAY_IMAGE
 from cnsr.ssh.agent import SESSION_AGENT, AgentKey
 from cnsr.ssh.remote import SshError, Target
-from cnsr.state import Node
+from cnsr.state import Node, XrayUser
 
 
 AGENT = "/home/u/.bitwarden-ssh-agent.sock"
@@ -85,6 +86,7 @@ class FakeServer:
         self.reality_fails: set[str] = set()  # domains a REALITY server cannot borrow (reality-candidates.sh)
         self.country: str | CnsrError = ""  # what Cloudflare's trace says, or the failure of the request
         self.resolves: dict[str, str | list[str]] = {}  # domain -> what the node resolves it to
+        self.lookups_fail = False  # whether every DNS lookup on the node takes too long
         self.reverse: dict[str, str] = {}  # address -> its name in reverse DNS
         self.scanned: dict[str, str] = {}  # domain -> address of every scanned neighbour: what it resolves to unless above
         # What apply-config.sh comes to; None: it dies after the restart and reports nothing.
@@ -193,6 +195,8 @@ class FakeServer:
             if isinstance(self.country, CnsrError):
                 raise self.country
             return f"fl=1\nip=203.0.113.9\nloc={self.country}\n"
+        if self.lookups_fail and head == ["sh", "-c"] and "getent" in command[2]:
+            raise CnsrError("远程命令超过 120 秒")
         if head == ["sh", "-c"] and "getent hosts" in command[2]:
             return "".join(f"{ip} {self.reverse[ip]}\n" for ip in command[4:] if ip in self.reverse)
         if head == ["sh", "-c"] and "getent" in command[2]:
@@ -428,7 +432,10 @@ class DeployFakes:
         for namespace_id, title in self.cloudflare.namespaces.items():
             raw = self.cloudflare.kv[namespace_id].get(f"node:{alias}") if title == "cnsr-control" else None
             if raw is not None:
-                return Node.from_json(raw)
+                node = Node.from_json(raw)
+                kept = self.cloudflare.kv[namespace_id].get(f"users:{alias}")
+                node.users = [XrayUser(**user) for user in json.loads(kept)] if kept else node.users
+                return node
         return None
 
     def kv(self) -> dict[str, str]:
@@ -437,8 +444,9 @@ class DeployFakes:
         return self.cloudflare.kv[namespace_id]
 
     def store(self, node: Node) -> None:
-        """Replace the node record in the control plane's KV."""
+        """Replace the node record, and its users, in the control plane's KV."""
         self.kv()[f"node:{node.alias}"] = node.to_json()
+        self.kv()[f"users:{node.alias}"] = json.dumps([{"name": u.name, "uuid": u.uuid} for u in node.users])
 
     def _record(self, name: str, *args, result=None):
         self.calls[name].append(args)

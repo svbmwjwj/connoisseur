@@ -15,6 +15,12 @@ def shareable(node: Node) -> bool:
     return features.XRAY in features.installed(node) and node.line is not None
 
 
+def users(node: Node) -> list[XrayUser]:
+    """The people the node is shared with. A reset of the owner that never took leaves the owner's
+    UUID recorded as a user's too: that one is nobody's to share."""
+    return [user for user in node.users if user.uuid != node.xray.uuid]
+
+
 def check(node: Node) -> None:
     """Raise when ``node`` has nothing to share, saying why."""
     if shareable(node):
@@ -30,9 +36,9 @@ def show_node(ui: Ui, node: Node) -> None:
     ui.styled(Text.assemble((node.alias, "bold"), "  的添加方式，不经过订阅"))
     ui.info("")
     _lines(ui, "你自己的（和订阅里的是同一份，不要分享）", node.line)
-    for user in node.users:
+    for user in users(node):
         show_user(ui, node, user)
-    if not node.users:
+    if not users(node):
         ui.styled(Text(f"分享给别人：cnsr user add {node.alias} <名字>，每个人一份，可以单独收回。", style="dim"))
     _note(ui, node)
 

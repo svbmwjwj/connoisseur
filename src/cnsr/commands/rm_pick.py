@@ -17,7 +17,7 @@ NONE_TICKED = "至少勾选一台服务器；不删就按 Ctrl-C 退出。"
 
 def choose(ui: Ui, inventory: Inventory) -> list[Node]:
     """The servers ticked, in alias order; none is ticked at first. Empty when there is none."""
-    nodes = [node for node in map(inventory.get, inventory.aliases()) if node is not None]
+    nodes = [node for node in (inventory.get(alias, users=False) for alias in inventory.aliases()) if node is not None]
     if not nodes:
         ui.info("控制端里没有服务器，没有可删除的。")
         return []

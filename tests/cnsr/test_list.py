@@ -261,3 +261,16 @@ def test_a_shared_node_is_masked_in_the_log(fake_deps, tmp_path):
     with runlog.started(tmp_path, "list", "jp-1", ["list", "jp-1"]) as run:
         _, out = run_list(fake_deps, "jp-1")
     assert uuid in fake_deps.terminal.screen and uuid not in run.path.read_text(encoding="utf-8")
+
+
+def test_the_owners_uuid_is_never_listed_as_a_users(fake_deps):
+    """A reset that never took leaves it recorded under both."""
+    assert run_up(fake_deps, aws="jp-tokyo") == 0
+    node = fake_deps.node()
+    node.users = [XrayUser("old-20261124", node.xray.uuid), XrayUser("alice", "22222222-2222-4222-8222-222222222222")]
+    fake_deps.store(node)
+    _, out = run_list(fake_deps, "jp-1")
+    assert "用户 alice" in out and "old-20261124" not in out
+    fake_deps.terminal.inputs = ["2", "3", "1", "2"]
+    _, out = run_list(fake_deps, menu=True)
+    assert "收回哪个用户" in out and "old-20261124" not in out

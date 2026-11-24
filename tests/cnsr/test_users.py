@@ -280,3 +280,18 @@ def refuse_test(fakes, monkeypatch) -> None:
         return original(words)
 
     monkeypatch.setattr(fakes.server, "command", command)
+
+
+def test_a_record_the_worker_wrote_back_loses_nobody(up):
+    """Its copy of the record may be from before a user was added, or taken back."""
+    run_user(up, "add", "alice")
+    stale = up.kv()["node:jp-1"]
+    run_user(up, "add", "bob")
+    up.kv()["node:jp-1"] = stale
+    run_user(up, "add", "carol")
+    assert names(up) == ["alice", "bob", "carol"] and len(clients(up)) == 4
+    up.terminal.inputs = ["1"]
+    run_user(up, "rm", "alice")
+    up.kv()["node:jp-1"] = stale
+    assert run_up(up, aws="jp-tokyo") == 0
+    assert "alice@jp-1" not in clients(up) and names(up) == ["bob", "carol"]

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import subprocess
+import time
+
 import pytest
 from deploy_fakes import run_up
 
+from cnsr.deploy import steps_sni
 from cnsr.errors import CnsrError
 from cnsr.scan import pool
 from cnsr.scan.filters import basic_ok
@@ -247,3 +251,52 @@ def test_another_provider_or_none_does_not(fake_deps, reverse):
 def test_neighbours_dns_places_right_need_no_reverse_lookup(fake_deps):
     assert run_up(fake_deps, aws="jp-tokyo") == 0
     assert not any("getent hosts" in what for what in fake_deps.server.what())
+
+
+@pytest.mark.parametrize(
+    "ours,theirs,same",
+    [
+        ("p1.tokyo.ocn.ne.jp", "www1.sakura.ne.jp", False),
+        ("p1.tokyo.ocn.ne.jp", "p2.osaka.ocn.ne.jp", True),
+        ("a.host.co.uk", "b.other.co.uk", False),
+        ("a.b.host.com.cn", "c.host.com.cn", True),
+        ("x.compute.amazonaws.com", "y.s3.amazonaws.com", True),
+        ("ocn.ne.jp", "ocn.ne.jp", False),  # nothing in front of the provider: not a host's name
+    ],
+)
+def test_a_providers_name_is_what_stands_before_the_public_suffix(fake_deps, ours, theirs, same):
+    neighbours(fake_deps, 2)
+    has_pool(fake_deps)
+    server = fake_deps.server
+    server.resolves["site0.example.com"] = "9.9.9.200"
+    server.reverse = {"203.0.113.10": ours, "9.9.9.200": theirs}
+    assert run_up(fake_deps, aws="jp-tokyo") == 0
+    assert sni(fake_deps) == ("site0.example.com" if same else "site1.example.com")
+
+
+def test_lookups_run_side_by_side_with_a_limit_each():
+    for script in (steps_sni.RESOLVE, steps_sni.REVERSE):
+        assert "timeout 5 getent" in script and script.rstrip().endswith("wait") and "&" in script
+
+
+@pytest.mark.parametrize("script,args", [("RESOLVE", ["a", "b"]), ("REVERSE", ["1.1.1.1", "2.2.2.2"])])
+def test_the_lookups_run_under_a_plain_sh(tmp_path, script, args):
+    """`timeout` and `getent` stand-ins: one that hangs is cut off, the others still answer."""
+    tool = tmp_path / "getent"
+    tool.write_text('#!/bin/sh\ncase "$2" in a|1.1.1.1) exec sleep 30;; esac\necho "$2 STREAM $2"\n')
+    limit = tmp_path / "timeout"
+    limit.write_text('#!/bin/sh\nshift\n"$@" & p=$!\n( sleep 1; kill $p 2>/dev/null ) >/dev/null 2>&1 &\nwait $p\n')
+    for path in (tool, limit):
+        path.chmod(0o755)
+    started = time.monotonic()
+    out = subprocess.run(["sh", "-c", getattr(steps_sni, script), "sh", *args], capture_output=True, text=True,
+                         env={"PATH": f"{tmp_path}:/usr/bin:/bin"}, timeout=25).stdout  # fmt: skip
+    assert time.monotonic() - started < 15 and args[1] in out
+
+
+def test_a_lookup_that_fails_outright_does_not_fail_the_run(fake_deps):
+    assert run_up(fake_deps, aws="jp-tokyo") == 0
+    before = fake_deps.server.files[BACKUPS_PATH]
+    fake_deps.server.lookups_fail = True
+    assert run_up(fake_deps, aws="jp-tokyo") == 0
+    assert fake_deps.server.files[BACKUPS_PATH] == before

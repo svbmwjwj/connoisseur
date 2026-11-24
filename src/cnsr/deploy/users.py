@@ -47,13 +47,13 @@ def add_user(ctx: DeployContext, name: str) -> XrayUser:
         user = known or XrayUser(name, new_identity(ctx.deps.rng)[0])
         if known is None:
             node.users.append(user)
-        ctx.inventory.put(node)
+        _save(ctx)
         try:
             _apply(ctx, current, node.users)
         except Refused:
             if known is None:
                 node.users.remove(user)
-                ctx.inventory.put(node)
+                _save(ctx)
             raise
     return user
 
@@ -66,7 +66,7 @@ def remove_user(ctx: DeployContext, name: str) -> None:
         left = [user for user in ctx.node.users if user.name != name]
         _apply(ctx, current, left)
         ctx.node.users = left
-        ctx.inventory.put(ctx.node)
+        _save(ctx)
 
 
 def reset_owner(ctx: DeployContext) -> XrayUser:
@@ -88,21 +88,27 @@ def reset_owner(ctx: DeployContext) -> XrayUser:
             if old is None:
                 old = XrayUser(_old_name(node.users), in_use)
                 node.users.append(old)
-            ctx.inventory.put(node)
+            _save(ctx)
             info = replace(node.xray, uuid=new_identity(ctx.deps.rng)[0])
             config = with_users(with_owner(current, info.uuid), node.alias, node.users)
             try:
                 apply_config(ctx, config, info)
             except Refused:
                 node.users.remove(old)
-                ctx.inventory.put(node)
+                _save(ctx)
                 raise
             node.xray = info
             node.line = node_line(node.domain, info, node.alias)
-        ctx.inventory.put(node)
+        _save(ctx)
         if _sync_identity(ctx) and ctx.exists(UNIT_PATH):  # the service reads it when it starts
             ctx.remote().run(["systemctl", "restart", SERVICE], sudo=True)
     return old
+
+
+def _save(ctx: DeployContext) -> None:
+    """Store the users, then the record with the identity the node has."""
+    ctx.inventory.put_users(ctx.node.alias, ctx.node.users)
+    ctx.inventory.put(ctx.node)
 
 
 def _old_name(users: list[XrayUser]) -> str:

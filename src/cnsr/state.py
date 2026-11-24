@@ -14,6 +14,8 @@ META_KEY = "meta:control"
 NODE_PREFIX = "node:"
 # The SNI rotation state of one node, owned by the control plane's Worker.
 STATE_PREFIX = "state:"
+# The people each node is shared with.
+USERS_PREFIX = "users:"
 # A JSON array of every node's alias. The Worker reads it instead of listing the namespace, which
 # the free plan allows only 1,000 times a day. It may name a node whose record is gone. It should
 # never miss one, but two runs rewriting it at the same time can drop a node: ``Inventory.aliases``
@@ -86,17 +88,24 @@ class Node:
     # What finished runs of ``cnsr up`` left on the server (see cnsr.features); empty until one did.
     features: list[str] = field(default_factory=list)
     # The people the node was shared with, besides the owner (``xray.uuid``, the one in the subscription).
+    # Kept apart from the record (``Inventory.put_users``), which the Worker rewrites as a whole.
     users: list[XrayUser] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         runlog.secret(self.node_token)
 
     def to_json(self) -> str:
-        return json.dumps(asdict(self), ensure_ascii=False)
+        """The record as it is stored: everything but ``users``."""
+        data = asdict(self)
+        del data["users"]
+        return json.dumps(data, ensure_ascii=False)
 
     @classmethod
     def from_json(cls, raw: str) -> Node:
-        """Parse a stored record. Unknown keys are ignored; a bad record raises ``ValueError``."""
+        """Parse a stored record. Unknown keys are ignored; a bad record raises ``ValueError``.
+
+        ``users`` is only found in a record from when it was part of it.
+        """
         data = _object(json.loads(raw))
         region = data.get("region")
         if isinstance(region, str) and region in LEGACY_REGIONS:
@@ -104,10 +113,7 @@ class Node:
         for key, nested in (("ssh", SshInfo), ("xray", XrayInfo)):
             if data.get(key) is not None:
                 data[key] = _build(nested, data[key])
-        users = data.get("users", [])
-        if not isinstance(users, list):
-            raise ValueError("users is not a list")
-        data["users"] = [_build(XrayUser, user) for user in users]
+        data["users"] = _users(data.get("users", []))
         return _build(cls, data)
 
 
@@ -148,13 +154,28 @@ class Inventory:
     def __init__(self, kv: KvStore):
         self._kv = kv
 
-    def get(self, alias: str) -> Node | None:
-        return self._read(NODE_PREFIX + alias, Node.from_json)
+    def get(self, alias: str, *, users: bool = True) -> Node | None:
+        """The node's record, with its users unless ``users`` is false, which spares a read."""
+        node = self._read(NODE_PREFIX + alias, Node.from_json)
+        if node is not None and users:
+            kept = self._read(USERS_PREFIX + alias, lambda raw: _users(json.loads(raw)))
+            node.users = node.users if kept is None else kept
+        return node
 
     def put(self, node: Node) -> None:
-        """Store the record; its alias goes into the index first, so the index never misses it."""
+        """Store the record; its alias goes into the index first, so the index never misses it.
+
+        ``users`` is not part of it, so a run that read them long ago cannot undo a later change.
+        Those of a record from when it was are moved to their own key before they go from it.
+        """
+        if node.users and self._kv.get(USERS_PREFIX + node.alias) is None:
+            self.put_users(node.alias, node.users)
         self.keep_indexed(node.alias)
         self._kv.put(NODE_PREFIX + node.alias, node.to_json())
+
+    def put_users(self, alias: str, users: list[XrayUser]) -> None:
+        """Store the people a node is shared with. Nobody but cnsr writes this key."""
+        self._kv.put(USERS_PREFIX + alias, json.dumps([asdict(user) for user in users], ensure_ascii=False))
 
     def aliases(self) -> list[str]:
         """Every node's alias, sorted, from the records themselves: one KV list.
@@ -178,7 +199,8 @@ class Inventory:
             self._write_index(aliases | {alias})
 
     def delete(self, alias: str) -> None:
-        """Delete the record, then take its alias out of the index."""
+        """Delete the users and the record, then take the alias out of the index."""
+        self._kv.delete(USERS_PREFIX + alias)
         self._kv.delete(NODE_PREFIX + alias)
         aliases, stored = self._index()
         if alias in aliases or not stored:
@@ -248,6 +270,12 @@ class Inventory:
             return parse(raw)
         except ValueError as exc:
             raise CnsrError(f"控制端里的记录 {key} 已损坏，无法读取。") from exc
+
+
+def _users(value: Any) -> list[XrayUser]:
+    if not isinstance(value, list):
+        raise ValueError("users is not a list")
+    return [_build(XrayUser, user) for user in value]
 
 
 def _object(value: Any) -> dict[str, Any]:

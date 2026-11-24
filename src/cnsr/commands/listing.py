@@ -70,7 +70,8 @@ def _list(deps: Deps, alias: str | None, menu: bool) -> int:
             raise CnsrError(f"没有名为 {alias} 的服务器。")
         sharing.show_node(deps.ui, node)
         return 0
-    nodes = [node for node in map(inventory.get, inventory.aliases()) if node is not None]
+    found = (inventory.get(name, users=menu) for name in inventory.aliases())  # the table shows no users
+    nodes = [node for node in found if node is not None]
 
     if not nodes:
         ui.info("控制端里还没有服务器。")
@@ -93,7 +94,7 @@ def _offer_one(deps: Deps, nodes: list[Node]) -> None:
     if not picked:
         return
     node = shareable[picked - 1]
-    actions = [SHOW, ADD_USER, *([REMOVE_USER] if node.users else []), RESET]
+    actions = [SHOW, ADD_USER, *([REMOVE_USER] if sharing.users(node) else []), RESET]
     action = actions[ui.choose(f"要对 {node.alias} 做什么？", actions)]
     if action == SHOW:
         sharing.show_node(ui, node)
@@ -102,7 +103,7 @@ def _offer_one(deps: Deps, nodes: list[Node]) -> None:
     elif action == RESET:
         user.reset(deps, node.alias)
     else:
-        names = [known.name for known in node.users]
+        names = [known.name for known in sharing.users(node)]
         user.remove(deps, node.alias, names[ui.choose("收回哪个用户？", names)])
 
 

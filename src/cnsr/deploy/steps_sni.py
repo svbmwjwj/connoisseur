@@ -22,10 +22,13 @@ from cnsr.ssh.remote import SshError
 MAX_BACKUPS = 30
 REFILL_BELOW = 10
 UNKNOWN_EGRESS_OPTIONS = ["确认是直连，继续扫描", "停止"]
-# Run on the node: prints "<domain> <address>" for every address each argument resolves to.
-RESOLVE = 'for d in "$@"; do getent ahostsv4 "$d" | while read -r ip _; do echo "$d $ip"; done; done; true'
+# Run on the node: prints "<domain> <address>" for every address each argument resolves to. The
+# lookups run side by side, each with a limit: one slow server must not take the time of all.
+RESOLVE = 'for d in "$@"; do timeout 5 getent ahostsv4 "$d" | while read -r ip _; do echo "$d $ip"; done & done; wait'
 # The same for addresses: prints "<address> <name>" for each one with a name in reverse DNS.
-REVERSE = 'for ip in "$@"; do getent hosts "$ip" | while read -r _ name _; do echo "$ip $name"; done; done; true'
+REVERSE = 'for ip in "$@"; do timeout 5 getent hosts "$ip" | while read -r _ name _; do echo "$ip $name"; done & done; wait'
+# Second labels under which a country's registry hands out names: `ocn.ne.jp`, not `ne.jp`, is a provider.
+SECOND_LEVEL = frozenset(("ac", "ad", "co", "com", "ed", "edu", "go", "gov", "gr", "lg", "ne", "net", "or", "org"))
 TRACE_URL = "https://www.cloudflare.com/cdn-cgi/trace"
 _COUNTRY = re.compile(r"^loc=([A-Z]{2})$", re.MULTILINE)
 PROXIED_OPTIONS = ["已关闭代理，重新检查", "停止"]
@@ -242,13 +245,19 @@ def _place(ctx: DeployContext, cands: list[Candidate]) -> list[Candidate]:
     """The candidates, each marked ``foreign`` when DNS does not place it at its address, nor at
     another one of the same provider (a load balancer's addresses come and go).
 
-    A node that resolves none of them says nothing about any.
+    A node that resolves none of them, or takes too long to, says nothing about any.
     """
-    found = _addresses(ctx, [cand.domain for cand in cands if not cand.pool])
-    if not found:
+    try:
+        found = _addresses(ctx, [cand.domain for cand in cands if not cand.pool])
+        if not found:
+            return cands
+        astray = [cand for cand in cands if not cand.pool and cand.ip not in found.get(cand.domain, [])]
+        providers = _providers(ctx, {ip for cand in astray for ip in (cand.ip, *found.get(cand.domain, []))})
+    except SshError:
+        raise
+    except CnsrError as exc:
+        ctx.deps.ui.detail(f"没能核对候选的 DNS，顺序按延迟：{exc}")
         return cands
-    astray = [cand for cand in cands if not cand.pool and cand.ip not in found.get(cand.domain, [])]
-    providers = _providers(ctx, {ip for cand in astray for ip in (cand.ip, *found.get(cand.domain, []))})
     foreign = {
         cand.domain
         for cand in astray
@@ -261,15 +270,16 @@ def _place(ctx: DeployContext, cands: list[Candidate]) -> list[Candidate]:
 
 
 def _providers(ctx: DeployContext, ips: set[str]) -> dict[str, str]:
-    """Whose each address is: the last two labels of its name in reverse DNS, such as ``amazonaws.com``."""
+    """Whose each address is: the end of its name in reverse DNS, such as ``amazonaws.com`` or ``ocn.ne.jp``."""
     found: dict[str, str] = {}
     if not ips:
         return found
     for line in ctx.remote().run(["sh", "-c", REVERSE, "sh", *sorted(ips)]).splitlines():
         fields = line.split()
         labels = fields[1].rstrip(".").lower().split(".") if len(fields) == 2 else []
-        if len(labels) > 2 and fields[0] in ips:
-            found.setdefault(fields[0], ".".join(labels[-2:]))
+        size = 3 if len(labels) > 1 and len(labels[-1]) == 2 and labels[-2] in SECOND_LEVEL else 2
+        if len(labels) > size and fields[0] in ips:
+            found.setdefault(fields[0], ".".join(labels[-size:]))
     return found
 
 

@@ -275,7 +275,7 @@ event-interaction https://<控制端域名>/<客户端 token>/check-ui.js, tag=c
 
 — 节点 token — 每台节点一个，只能读写自己的条目。一台节点被攻破，不影响其他节点。
 — 客户端 token — 一个，你和你分享的人共用。首版不支持单独作废某一个人。
-— 节点用户 — 记录在 `node:<别名>` 的 `users` 里（名字和 UUID），Xray 配置的 `clients` 第一个是你自己，后面是用户；重跑 `cnsr up` 按记录重新生成（用户：添加和收回，D-011；其余 Claude）。改用户时先停换 SNI 服务，只改 `clients`，过 `xray -test` 后由节点上的 `apply-config.sh`（systemd 运行）重启、验证握手、失败恢复旧配置，cnsr 重连后读结果：这台电脑可能正经过节点自己的 Xray 连节点，重启会切断连接（Claude，2026-11-24 真机验证发现）。
+— 节点用户 — 单独存在 `users:<别名>`（名字和 UUID），只有 cnsr 写：Worker 换 SNI 时会把读到的整条 `node:<别名>` 写回，可能是约一分钟前的旧记录，用户放在里面会丢失或复活（Claude，2026-11-24 审查发现）。旧格式记录里的 `users` 读得出来，下次保存时迁移。Xray 配置的 `clients` 第一个是你自己，后面是用户；重跑 `cnsr up` 按记录重新生成（用户：添加和收回，D-011；其余 Claude）。改用户时先停换 SNI 服务，只改 `clients`，过 `xray -test` 后由节点上的 `apply-config.sh`（systemd 运行）重启、验证握手、失败恢复旧配置，cnsr 重连后读结果：这台电脑可能正经过节点自己的 Xray 连节点，重启会切断连接（Claude，2026-11-24 真机验证发现）。
 — 重启 Xray — `cnsr up` 在配置或 `compose.yml` 有变化时用同一个 `apply-config.sh`，换 SNI 服务照旧停到最后一步；握手失败时恢复旧配置再报错（用户：改成同样做法；其余 Claude，2026-11-24）。
 — 管理 token — 存在 KV 里，只用于 `/admin/probe`，有 Cloudflare token 就能读到。
 — 失败即拒绝 — 缺少任何 token 配置时拒绝请求，不放行。

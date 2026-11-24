@@ -240,7 +240,7 @@ def test_inventory_delete_removes_the_record_then_the_alias(fake_kv):
     delete = fake_kv.delete
     fake_kv.delete = lambda key: (seen.append((index(fake_kv), key)), delete(key))
     inventory.delete("jp-1")
-    assert seen == [(["jp-1", "jp-2"], "node:jp-1")]
+    assert seen == [(["jp-1", "jp-2"], "users:jp-1"), (["jp-1", "jp-2"], "node:jp-1")]
     assert index(fake_kv) == ["jp-2"] and "node:jp-1" not in fake_kv.data
 
 
@@ -343,16 +343,82 @@ def test_tokens_and_uuid_are_registered(monkeypatch):
 # --- users ---
 
 
-def test_users_survive_the_record():
-    node = full_node()
-    node.users = [XrayUser("alice", "u-1"), XrayUser("bob", "u-2")]
-    assert Node.from_json(node.to_json()) == node
+ALICE, BOB = XrayUser("alice", "u-1"), XrayUser("bob", "u-2")
 
 
-def test_a_record_from_before_users_has_none():
-    data = json.loads(full_node().to_json())
-    del data["users"]
-    assert Node.from_json(json.dumps(data)).users == []
+def legacy_record(*users) -> str:
+    """A record as cnsr wrote it when users were part of it."""
+    return json.dumps(json.loads(full_node().to_json()) | {"users": [{"name": u.name, "uuid": u.uuid} for u in users]})
+
+
+def test_users_are_kept_apart_from_the_record(fake_kv):
+    inventory = Inventory(fake_kv)
+    inventory.put(full_node())
+    inventory.put_users("jp-1", [ALICE, BOB])
+    assert inventory.get("jp-1").users == [ALICE, BOB]
+    assert "users" not in json.loads(fake_kv.data["node:jp-1"])
+
+
+def test_a_stale_record_written_back_takes_no_user_and_brings_none_back(fake_kv):
+    """The Worker rewrites the whole record from what it read, which may be a minute old."""
+    inventory = Inventory(fake_kv)
+    inventory.put(full_node())
+    stale = fake_kv.data["node:jp-1"]
+    inventory.put_users("jp-1", [ALICE])
+    fake_kv.data["node:jp-1"] = stale
+    assert inventory.get("jp-1").users == [ALICE]
+    inventory.put_users("jp-1", [])
+    fake_kv.data["node:jp-1"] = legacy_record(ALICE)
+    assert inventory.get("jp-1").users == []
+
+
+def test_a_record_from_when_users_were_part_of_it_still_has_them(fake_kv):
+    fake_kv.data["node:jp-1"] = legacy_record(ALICE)
+    assert Inventory(fake_kv).get("jp-1").users == [ALICE]
+
+
+def test_saving_such_a_record_moves_its_users_first(fake_kv):
+    fake_kv.data["node:jp-1"] = legacy_record(ALICE)
+    inventory = Inventory(fake_kv)
+    inventory.put(inventory.get("jp-1"))
+    assert "users" not in json.loads(fake_kv.data["node:jp-1"])
+    assert inventory.get("jp-1").users == [ALICE]
+
+
+def test_saving_a_record_never_rewrites_the_users_kept_apart(fake_kv):
+    inventory = Inventory(fake_kv)
+    inventory.put(full_node())
+    read_before = inventory.get("jp-1")
+    inventory.put_users("jp-1", [BOB])
+    read_before.users = [ALICE]  # what a long run read at its start
+    inventory.put(read_before)
+    assert inventory.get("jp-1").users == [BOB]
+
+
+def test_deleting_a_node_deletes_its_users_too(fake_kv):
+    inventory = Inventory(fake_kv)
+    inventory.put(full_node())
+    inventory.put_users("jp-1", [ALICE])
+    inventory.delete("jp-1")
+    assert not any(key.endswith("jp-1") for key in fake_kv.data)
+
+
+def test_the_users_of_a_node_need_no_read_to_list_the_records(fake_kv):
+    Inventory(fake_kv).put(full_node())
+    read = []
+    get = fake_kv.get
+    fake_kv.get = lambda key: (read.append(key), get(key))[1]
+    Inventory(fake_kv).get("jp-1", users=False)
+    assert read == ["node:jp-1"]
+
+
+@pytest.mark.parametrize("raw", ["garbage", "{}", '[{"name": "alice"}]'])
+def test_damaged_users_are_an_error_and_not_nobody(fake_kv, raw):
+    """Taking them for an empty list would let the next run throw everyone off the node."""
+    Inventory(fake_kv).put(full_node())
+    fake_kv.data["users:jp-1"] = raw
+    with pytest.raises(CnsrError, match="users:jp-1"):
+        Inventory(fake_kv).get("jp-1")
 
 
 @pytest.mark.parametrize("users", ["alice", [{"name": "alice"}], ["alice"], {"alice": "u-1"}])
